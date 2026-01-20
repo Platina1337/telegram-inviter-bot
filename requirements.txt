@@ -1,0 +1,19 @@
+# Inviter Bot Requirements
+
+# Pyrogram for Telegram API
+pyrogram>=2.0.106
+TgCrypto>=1.2.5
+
+# FastAPI for parser service
+fastapi>=0.104.0
+uvicorn>=0.24.0
+httpx>=0.25.0
+
+# Async SQLite database
+aiosqlite>=0.19.0
+
+# Pydantic for data validation
+pydantic>=2.5.0
+
+# Python-dotenv for environment variables
+python-dotenv>=1.0.0

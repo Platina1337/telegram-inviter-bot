@@ -1,0 +1,62 @@
+# Ignore Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment files
+.env
+
+# Database files
+*.db
+*.db-journal
+
+# Session files
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.backup
+
+# Configuration files with sensitive data
+.env.local
+.env.production
+.env.staging
+
+# Cache directories
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Distribution files
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,4 @@
+# This directory stores Telegram session files (.session)
+# Do not commit session files to version control!
+*.session
+*.session-journal
