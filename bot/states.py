@@ -196,7 +196,7 @@ def get_settings_keyboard(current_settings: Dict = None) -> InlineKeyboardMarkup
     rotate = settings.get('rotate_sessions', False)
     rotate = settings.get('rotate_sessions', False)
     rotate_every = settings.get('rotate_every', 0)
-    use_proxy = settings.get('use_proxy', False)
+    use_proxy = settings.get('use_proxy', True)
     
     limit_text = str(limit) if limit else "Без лимита"
     rotate_text = "✅" if rotate else "❌"

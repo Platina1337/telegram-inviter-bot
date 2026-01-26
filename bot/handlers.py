@@ -269,6 +269,7 @@ async def start_invite_flow(client: Client, message: Message):
             'limit': None,
             'rotate_sessions': False,
             'rotate_every': 0,
+            'use_proxy': True,
             'selected_sessions': [],
             'filter_mode': 'all',
             'inactive_threshold_days': None
@@ -771,7 +772,7 @@ async def callback_handler(client: Client, callback_query):
 
     if data == "settings_proxy":
         settings = user_states[user_id].get('invite_settings', {})
-        settings['use_proxy'] = not settings.get('use_proxy', False)
+        settings['use_proxy'] = not settings.get('use_proxy', True)
         user_states[user_id]['invite_settings'] = settings
         
         status = "включен" if settings['use_proxy'] else "выключен"
@@ -824,7 +825,7 @@ async def callback_handler(client: Client, callback_query):
 🔢 Каждые {settings.get('delay_every', 1)} инвайта
 🔢 Лимит: {settings.get('limit') or 'Без лимита'}
 🔄 Ротация сессий: {rotate_info}
-🌐 Прокси: {'✅' if settings.get('use_proxy') else '❌'}
+🌐 Прокси: {'✅' if settings.get('use_proxy', True) else '❌'}
 """
         
         await callback_query.edit_message_text(text, reply_markup=get_invite_menu_keyboard())
@@ -1012,7 +1013,7 @@ async def handle_invite_start(client: Client, callback_query):
         limit=settings.get('limit'),
         rotate_sessions=settings.get('rotate_sessions', False),
         rotate_every=settings.get('rotate_every', 0),
-        use_proxy=settings.get('use_proxy', False),
+        use_proxy=settings.get('use_proxy', True),
         available_sessions=available_sessions,
         filter_mode=settings.get('filter_mode', 'all'),
         inactive_threshold_days=settings.get('inactive_threshold_days')
