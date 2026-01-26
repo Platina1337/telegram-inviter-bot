@@ -3,8 +3,22 @@
 Shared models for the inviter bot.
 """
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
+
+
+@dataclass
+class FilterMode:
+    """Defines how users are filtered during inviting."""
+    mode: Literal["all", "exclude_admins", "exclude_inactive", "exclude_admins_and_inactive"] = "all"
+    inactive_threshold_days: Optional[int] = None  # Days, for "exclude_inactive" and "exclude_admins_and_inactive"
+
+
+@dataclass
+class InviteFilterSettings:
+    """Settings related to filtering users during an invite task."""
+    filter_mode: Literal["all", "exclude_admins", "exclude_inactive", "exclude_admins_and_inactive"] = "all"
+    inactive_threshold_days: Optional[int] = None
 
 
 @dataclass
@@ -20,6 +34,7 @@ class SessionMeta:
     user_id: Optional[int] = None
     created_at: Optional[str] = None
     assigned_tasks: List[str] = field(default_factory=list)
+    proxy: Optional[str] = None
 
 
 @dataclass
@@ -42,11 +57,16 @@ class InviteTask:
     delay_every: int = 1
     rotate_sessions: bool = False
     rotate_every: int = 0  # 0 means disabled/only on error
+    use_proxy: bool = False
     available_sessions: List[str] = field(default_factory=list)
+    failed_sessions: List[str] = field(default_factory=list)  # Сессии с критическими ошибками для этой задачи
     current_offset: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     error_message: Optional[str] = None
+    # Filter settings
+    filter_mode: Literal["all", "exclude_admins", "exclude_inactive", "exclude_admins_and_inactive"] = "all"
+    inactive_threshold_days: Optional[int] = None
 
 
 @dataclass
@@ -57,4 +77,5 @@ class InviteSettings:
     limit: Optional[int] = None
     rotate_sessions: bool = False
     rotate_every: int = 0
+    use_proxy: bool = False
     session_aliases: List[str] = field(default_factory=list)

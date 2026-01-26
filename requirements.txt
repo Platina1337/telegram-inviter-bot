@@ -8,6 +8,7 @@ TgCrypto>=1.2.5
 fastapi>=0.104.0
 uvicorn>=0.24.0
 httpx>=0.25.0
+httpx-socks>=0.8.0
 
 # Async SQLite database
 aiosqlite>=0.19.0

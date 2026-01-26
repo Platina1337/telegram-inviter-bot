@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     global db, session_manager, inviter_worker
     
     # Startup
-    logger.info("Starting Inviter Parser Service...")
+    logger.info("Запуск сервиса Inviter Parser...")
     
     # Initialize database
     db = Database(config.DATABASE_PATH)
@@ -63,16 +63,17 @@ async def lifespan(app: FastAPI):
     for task in running_tasks:
         logger.info(f"Resuming task {task.id}")
         await inviter_worker.start_invite_task(task.id)
+        logger.info(f"Возобновление задачи {task.id}")
     
-    logger.info("Inviter Parser Service started successfully")
+    logger.info("Сервис Inviter Parser успешно запущен")
     
     yield
     
     # Shutdown
-    logger.info("Shutting down Inviter Parser Service...")
+    logger.info("Остановка сервиса Inviter Parser...")
     await session_manager.stop_all()
     await db.close()
-    logger.info("Inviter Parser Service stopped")
+    logger.info("Сервис Inviter Parser остановлен")
 
 
 app = FastAPI(
@@ -99,6 +100,7 @@ class SessionInfo(BaseModel):
     is_active: bool = True
     user_id: Optional[int] = None
     created_at: Optional[str] = None
+    proxy: Optional[str] = None
 
 
 class AddSessionRequest(BaseModel):
@@ -126,6 +128,10 @@ class SignInPasswordRequest(BaseModel):
     password: str
 
 
+class SetSessionProxyRequest(BaseModel):
+    proxy: str
+
+
 class CreateTaskRequest(BaseModel):
     user_id: int
     source_group_id: int
@@ -141,7 +147,10 @@ class CreateTaskRequest(BaseModel):
     limit: Optional[int] = None
     rotate_sessions: bool = False
     rotate_every: int = 0
+    use_proxy: bool = False
     available_sessions: List[str] = []
+    filter_mode: str = 'all'
+    inactive_threshold_days: Optional[int] = None
 
 
 class UpdateTaskRequest(BaseModel):
@@ -149,7 +158,9 @@ class UpdateTaskRequest(BaseModel):
     delay_every: Optional[int] = None
     limit: Optional[int] = None
     rotate_sessions: Optional[bool] = None
+    rotate_sessions: Optional[bool] = None
     rotate_every: Optional[int] = None
+    use_proxy: Optional[bool] = None
     available_sessions: Optional[List[str]] = None
 
 
@@ -179,8 +190,10 @@ async def list_sessions():
                 "alias": s.alias,
                 "phone": s.phone,
                 "is_active": s.is_active,
+                "is_active": s.is_active,
                 "user_id": s.user_id,
-                "created_at": s.created_at
+                "created_at": s.created_at,
+                "proxy": s.proxy
             }
             for s in sessions
         ],
@@ -241,6 +254,35 @@ async def sign_in(alias: str, request: SignInRequest):
 async def sign_in_password(alias: str, request: SignInPasswordRequest):
     """Sign in with 2FA password."""
     result = await session_manager.sign_in_with_password(alias, request.password)
+    result = await session_manager.sign_in_with_password(alias, request.password)
+    return result
+
+
+@app.post("/sessions/{alias}/proxy")
+async def set_session_proxy(alias: str, request: SetSessionProxyRequest):
+    """Set proxy for a session."""
+    result = await session_manager.set_session_proxy(alias, request.proxy)
+    return result
+
+
+@app.delete("/sessions/{alias}/proxy")
+async def remove_session_proxy(alias: str):
+    """Remove proxy from a session."""
+    result = await session_manager.remove_session_proxy(alias)
+    return result
+
+
+@app.post("/sessions/{alias}/proxy/test")
+async def test_session_proxy(alias: str, use_proxy: bool = True):
+    """Test proxy connection for a session."""
+    result = await session_manager.test_proxy_connection(alias, use_proxy)
+    return result
+
+
+@app.post("/sessions/copy_proxy")
+async def copy_proxy(from_alias: str, to_alias: str):
+    """Copy proxy configuration from one session to another."""
+    result = await session_manager.copy_proxy_to_session(from_alias, to_alias)
     return result
 
 
@@ -301,7 +343,7 @@ async def get_group_info(session_alias: str, group_input: str):
             "type": str(chat.type)
         }
     except Exception as e:
-        logger.error(f"Error getting group info: {e}")
+        logger.error(f"Ошибка получения информации о группе: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -384,7 +426,10 @@ async def create_task(request: CreateTaskRequest):
         limit=request.limit,
         rotate_sessions=request.rotate_sessions,
         rotate_every=request.rotate_every,
-        available_sessions=request.available_sessions
+        use_proxy=request.use_proxy,
+        available_sessions=request.available_sessions,
+        filter_mode=request.filter_mode,
+        inactive_threshold_days=request.inactive_threshold_days
     )
     task_id = await db.create_invite_task(task)
     return {"success": True, "task_id": task_id}
@@ -414,6 +459,7 @@ async def get_user_tasks(user_id: int, status: Optional[str] = None):
                 "limit": t.limit,
                 "rotate_sessions": t.rotate_sessions,
                 "rotate_every": t.rotate_every,
+                "use_proxy": t.use_proxy,
                 "created_at": t.created_at
             }
             for t in tasks
@@ -435,6 +481,8 @@ async def update_task(task_id: int, request: UpdateTaskRequest):
         updates['rotate_sessions'] = 1 if request.rotate_sessions else 0
     if request.rotate_every is not None:
         updates['rotate_every'] = request.rotate_every
+    if request.use_proxy is not None:
+        updates['use_proxy'] = 1 if request.use_proxy else 0
     if request.available_sessions is not None:
         updates['available_sessions'] = ','.join(request.available_sessions)
     

@@ -88,6 +88,23 @@ class APIClient:
         """Initialize a new session."""
         return await self._make_request("POST", f"/sessions/init/{alias}")
     
+    async def set_session_proxy(self, alias: str, proxy: str) -> Dict[str, Any]:
+        """Set proxy for a session."""
+        return await self._make_request("POST", f"/sessions/{alias}/proxy", json={"proxy": proxy})
+
+    async def remove_session_proxy(self, alias: str) -> Dict[str, Any]:
+        """Remove proxy from a session."""
+        return await self._make_request("DELETE", f"/sessions/{alias}/proxy")
+
+    async def test_session_proxy(self, alias: str, use_proxy: bool = True) -> Dict[str, Any]:
+        """Test proxy connection for a session."""
+        return await self._make_request("POST", f"/sessions/{alias}/proxy/test", params={"use_proxy": use_proxy})
+
+    async def copy_session_proxy(self, from_alias: str, to_alias: str) -> Dict[str, Any]:
+        """Copy proxy configuration from one session to another."""
+        return await self._make_request("POST", "/sessions/copy_proxy",
+                                      params={"from_alias": from_alias, "to_alias": to_alias})
+
     # ============== Groups ==============
     
     async def get_group_info(self, session_alias: str, group_input: str) -> Dict[str, Any]:
@@ -150,7 +167,10 @@ class APIClient:
                           invite_mode: str = 'member_list',
                           delay_seconds: int = 30, delay_every: int = 1, limit: int = None, 
                           rotate_sessions: bool = False, rotate_every: int = 0,
-                          available_sessions: List[str] = None) -> Dict[str, Any]:
+                          use_proxy: bool = False,
+                          available_sessions: List[str] = None,
+                          filter_mode: str = 'all',
+                          inactive_threshold_days: int = None) -> Dict[str, Any]:
         """Create a new invite task."""
         return await self._make_request("POST", "/tasks", json={
             "user_id": user_id,
@@ -167,7 +187,10 @@ class APIClient:
             "limit": limit,
             "rotate_sessions": rotate_sessions,
             "rotate_every": rotate_every,
-            "available_sessions": available_sessions or []
+            "use_proxy": use_proxy,
+            "available_sessions": available_sessions or [],
+            "filter_mode": filter_mode,
+            "inactive_threshold_days": inactive_threshold_days
         })
     
     async def get_task(self, task_id: int) -> Dict[str, Any]:
@@ -181,6 +204,7 @@ class APIClient:
     
     async def update_task(self, task_id: int, delay_seconds: int = None, delay_every: int = None,
                           limit: int = None, rotate_sessions: bool = None, rotate_every: int = None,
+                          use_proxy: bool = None,
                           available_sessions: List[str] = None) -> Dict[str, Any]:
         """Update task settings."""
         data = {}
@@ -194,6 +218,8 @@ class APIClient:
             data['rotate_sessions'] = rotate_sessions
         if rotate_every is not None:
             data['rotate_every'] = rotate_every
+        if use_proxy is not None:
+            data['use_proxy'] = use_proxy
         if available_sessions is not None:
             data['available_sessions'] = available_sessions
         

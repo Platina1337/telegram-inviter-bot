@@ -76,7 +76,15 @@ async def text_message_handler(client, message):
 @bot.on_callback_query()
 async def callback_query_handler(client, callback_query):
     """Handle all callback queries."""
-    await callback_handler(client, callback_query)
+    try:
+        await callback_handler(client, callback_query)
+    except Exception as e:
+        logger.error(f"Error handling callback query: {e}", exc_info=True)
+        # Try to answer the callback query if it's still valid
+        try:
+            await callback_query.answer("❌ Произошла ошибка при обработке запроса", show_alert=True)
+        except Exception:
+            pass  # Query expired or already answered, ignore
 
 
 # ============== Main ==============

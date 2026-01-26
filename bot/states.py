@@ -32,6 +32,10 @@ FSM_SETTINGS_DELAY = "settings_delay"
 FSM_SETTINGS_DELAY_EVERY = "settings_delay_every"
 FSM_SETTINGS_LIMIT = "settings_limit"
 FSM_SETTINGS_ROTATE_EVERY = "settings_rotate_every"
+FSM_SETTINGS_FILTER_MODE = "settings_filter_mode"
+FSM_SETTINGS_INACTIVE_THRESHOLD_DAYS = "settings_inactive_threshold_days"
+FSM_SETTINGS_FILTER_MODE = "settings_filter_mode"
+FSM_SETTINGS_INACTIVE_THRESHOLD_DAYS = "settings_inactive_threshold_days"
 
 # Session management states
 FSM_SESSION_NAME = "session_name"
@@ -40,6 +44,7 @@ FSM_SESSION_API_HASH = "session_api_hash"
 FSM_SESSION_PHONE = "session_phone"
 FSM_SESSION_CODE = "session_code"
 FSM_SESSION_PASSWORD = "session_password"
+FSM_SESSION_PROXY = "session_proxy"
 
 
 # ============== Channel/Group Parsing ==============
@@ -189,11 +194,26 @@ def get_settings_keyboard(current_settings: Dict = None) -> InlineKeyboardMarkup
     delay_every = settings.get('delay_every', 1)
     limit = settings.get('limit')
     rotate = settings.get('rotate_sessions', False)
+    rotate = settings.get('rotate_sessions', False)
     rotate_every = settings.get('rotate_every', 0)
+    use_proxy = settings.get('use_proxy', False)
     
     limit_text = str(limit) if limit else "Без лимита"
     rotate_text = "✅" if rotate else "❌"
+    proxy_text = "✅" if use_proxy else "❌"
     rotate_every_text = f"По кругу ({rotate_every} инв.)" if rotate and rotate_every > 0 else "При ошибке"
+
+    filter_mode = settings.get('filter_mode', 'all')
+    inactive_threshold_days = settings.get('inactive_threshold_days')
+
+    filter_mode_text = {
+        "all": "Всех",
+        "exclude_admins": "Кроме админов",
+        "exclude_inactive": "Кроме неактивных",
+        "exclude_admins_and_inactive": "Кроме админов и неактивных"
+    }.get(filter_mode, "Всех")
+
+    inactive_threshold_text = f"{inactive_threshold_days} дн." if inactive_threshold_days is not None else "Выкл."
     
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"⏱️ Задержка: {delay} сек", callback_data="settings_delay")],
@@ -201,6 +221,9 @@ def get_settings_keyboard(current_settings: Dict = None) -> InlineKeyboardMarkup
         [InlineKeyboardButton(f"🔢 Лимит: {limit_text}", callback_data="settings_limit")],
         [InlineKeyboardButton(f"🔄 Ротация сессий: {rotate_text}", callback_data="settings_rotate")],
         [InlineKeyboardButton(f"🔄 Ротация каждые: {rotate_every} инв.", callback_data="settings_rotate_every")],
+        [InlineKeyboardButton(f"🌐 Использовать прокси: {proxy_text}", callback_data="settings_proxy")],
+        [InlineKeyboardButton(f"👥 Фильтр: {filter_mode_text}", callback_data="settings_filter_mode")],
+        [InlineKeyboardButton(f"🛌 Неактивен >: {inactive_threshold_text}", callback_data="settings_inactive_threshold_days")],
         [InlineKeyboardButton("🔐 Выбор сессий", callback_data="settings_sessions")],
         [InlineKeyboardButton("🔙 Назад", callback_data="settings_back")]
     ])
@@ -265,6 +288,10 @@ def get_task_assignment_keyboard(session_alias: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 Инвайтинг", callback_data=f"assign_task:inviting:{session_alias}")],
         [InlineKeyboardButton("❌ Убрать из инвайтинга", callback_data=f"remove_task:inviting:{session_alias}")],
+        [InlineKeyboardButton("🌐 Настроить прокси", callback_data=f"set_proxy:{session_alias}")],
+        [InlineKeyboardButton("🧪 Проверить прокси", callback_data=f"test_proxy:{session_alias}")],
+        [InlineKeyboardButton("🗑️ Удалить прокси", callback_data=f"remove_proxy:{session_alias}")],
+        [InlineKeyboardButton("📋 Копировать прокси", callback_data=f"copy_proxy:{session_alias}")],
         [InlineKeyboardButton("🔙 Отмена", callback_data="cancel_session_action")]
     ])
 
@@ -292,6 +319,29 @@ def format_invite_status(task_data: Dict) -> str:
     if task_data.get('rotate_sessions') and task_data.get('rotate_every', 0) > 0:
         rotate_info += f" (каждые {task_data['rotate_every']} инв.)"
     
+    proxy_info = 'Да' if task_data.get('use_proxy') else 'Нет'
+
+    filter_mode = task_data.get('filter_mode', 'all')
+    inactive_threshold_days = task_data.get('inactive_threshold_days')
+
+    filter_mode_text = {
+        "all": "Всех",
+        "exclude_admins": "Кроме админов",
+        "exclude_inactive": "Кроме неактивных",
+        "exclude_admins_and_inactive": "Кроме админов и неактивных"
+    }.get(filter_mode, "Всех")
+
+    inactive_threshold_text = f"{inactive_threshold_days} дн." if inactive_threshold_days is not None else "Выкл."
+    
+    # Format available sessions list
+    available_sessions = task_data.get('available_sessions', [])
+    if available_sessions:
+        sessions_text = ', '.join(available_sessions)
+    else:
+        # Fallback to current session if available_sessions is empty
+        current_session = task_data.get('session', 'N/A')
+        sessions_text = current_session
+    
     text = f"""
 {icon} **Статус инвайтинга**
 
@@ -301,7 +351,11 @@ def format_invite_status(task_data: Dict) -> str:
 👥 Приглашено: {invited}{limit_text}
 ⏱️ Задержка: ~{task_data.get('delay_seconds', 30)} сек (каждые {task_data.get('delay_every', 1)} инв.)
 🔐 Сессия: {task_data.get('session', 'N/A')}
+📋 Сессии: {sessions_text}
 🔄 Ротация: {rotate_info}
+🌐 Прокси: {proxy_info}
+👥 Фильтр: {filter_mode_text}
+🛌 Неактивен >: {inactive_threshold_text}
 
 📋 Статус: {status.capitalize()}
 """
@@ -316,22 +370,24 @@ def format_sessions_list(sessions: List[Dict], assignments: Dict) -> str:
     """Format sessions list message."""
     text = "📱 **Управление сессиями**\n\n"
     text += "**Доступные сессии:**\n"
-    
+
     if sessions:
         for session in sessions:
             alias = session.get('alias', '')
             phone = session.get('phone', '')
             is_active = session.get('is_active', False)
+            proxy = session.get('proxy', '')
             status = '🟢' if is_active else '🔴'
-            text += f"- {status} **{alias}** | `{phone}`\n"
+            proxy_status = '🌐' if proxy else '❌'
+            text += f"- {status} **{alias}** | `{phone}` {proxy_status}\n"
     else:
         text += "Нет доступных сессий.\n"
-    
+
     text += "\n**Назначения:**\n"
     inviting_sessions = assignments.get('inviting', [])
     if inviting_sessions:
         text += f"- Инвайтинг: {', '.join(inviting_sessions)}\n"
     else:
         text += "- Инвайтинг: не назначено\n"
-    
+
     return text

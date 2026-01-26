@@ -6,6 +6,7 @@ import logging
 from typing import Dict
 from pyrogram import Client
 from pyrogram.types import Message, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import MessageNotModified
 
 from bot.api_client import api_client
 from bot.states import (
@@ -13,7 +14,7 @@ from bot.states import (
     FSM_MAIN_MENU, FSM_INVITE_SOURCE_GROUP, FSM_INVITE_TARGET_GROUP,
     FSM_INVITE_SESSION_SELECT, FSM_INVITE_MENU, FSM_INVITE_SETTINGS,
     FSM_SETTINGS_DELAY, FSM_SETTINGS_DELAY_EVERY, FSM_SETTINGS_LIMIT,
-    FSM_SETTINGS_ROTATE_EVERY,
+    FSM_SETTINGS_ROTATE_EVERY, FSM_SESSION_PROXY, FSM_SETTINGS_FILTER_MODE, FSM_SETTINGS_INACTIVE_THRESHOLD_DAYS,
     get_main_keyboard, get_group_history_keyboard, get_target_group_history_keyboard,
     get_invite_menu_keyboard, get_settings_keyboard, get_session_select_keyboard,
     get_invite_running_keyboard, get_invite_paused_keyboard,
@@ -186,6 +187,57 @@ async def text_handler(client: Client, message: Message):
             await show_invite_settings(client, message)
         except ValueError:
             await message.reply("❌ Введите число (0 для ротации только при ошибках)")
+            await message.reply("❌ Введите число (0 для ротации только при ошибках)")
+        return
+    
+    # Settings inactive threshold days input
+    if state == FSM_SETTINGS_INACTIVE_THRESHOLD_DAYS:
+        if text == "🔙 Назад":
+            await show_invite_settings(client, message)
+            return
+            
+        if text.lower() in ['none', 'нет', 'no', '-', '0']:
+            user_states[user_id]['invite_settings']['inactive_threshold_days'] = None
+            await message.reply("✅ Фильтр неактивных пользователей выключен")
+            await show_invite_settings(client, message)
+            return
+            
+        try:
+            days = int(text)
+            if days < 1:
+                days = 1
+            
+            user_states[user_id]['invite_settings']['inactive_threshold_days'] = days
+            await message.reply(f"✅ Фильтр неактивных установлен: {days} дней")
+            await show_invite_settings(client, message)
+        except ValueError:
+            await message.reply("❌ Введите число дней или 'нет' для отключения фильтра")
+        return
+    
+    # Session proxy input
+    if state == FSM_SESSION_PROXY:
+        session_name = user_states[user_id].get('session_name')
+        if not session_name:
+            await sessions_command(client, message)
+            return
+            
+        proxy_str = text.strip()
+        if proxy_str.lower() in ['none', 'нет', 'no', '-', '0']:
+            proxy_str = None
+            
+        try:
+            response = await api_client.set_session_proxy(session_name, proxy_str if proxy_str else "none")
+            if response.get("success"):
+                status = "✅ Прокси установлен" if proxy_str else "🗑️ Прокси удален"
+                await message.reply(f"{status} для сессии **{session_name}**!")
+            else:
+                await message.reply(f"❌ Ошибка: {response.get('error')}")
+        except Exception as e:
+            await message.reply(f"❌ Ошибка соединения: {e}")
+            
+        # Clean state and return to sessions
+        user_states[user_id] = {}
+        await sessions_command(client, message)
         return
     
     # Default - show main menu
@@ -217,7 +269,9 @@ async def start_invite_flow(client: Client, message: Message):
             'limit': None,
             'rotate_sessions': False,
             'rotate_every': 0,
-            'selected_sessions': []
+            'selected_sessions': [],
+            'filter_mode': 'all',
+            'inactive_threshold_days': None
         }}
     
     user_states[user_id]['state'] = FSM_INVITE_SOURCE_GROUP
@@ -394,22 +448,45 @@ async def show_invite_settings(client: Client, message: Message):
     )
 
 
-async def show_tasks_status(client: Client, message: Message):
-    """Show all tasks status."""
+async def show_tasks_status(client: Client, message: Message, page: int = 0, edit_message: bool = False):
+    """Show all tasks status with pagination."""
     user_id = message.from_user.id
     
     result = await api_client.get_user_tasks(user_id)
     tasks = result.get('tasks', [])
     
     if not tasks:
-        await message.reply(
-            "📊 **Статус задач**\n\n"
-            "У вас нет активных задач инвайтинга.",
-            reply_markup=get_main_keyboard()
-        )
+        if edit_message:
+            try:
+                await message.edit_text(
+                    "📊 **Статус задач**\n\n"
+                    "У вас нет активных задач инвайтинга.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="tasks_back")]])
+                )
+            except:
+                await message.reply(
+                    "📊 **Статус задач**\n\n"
+                    "У вас нет активных задач инвайтинга.",
+                    reply_markup=get_main_keyboard()
+                )
+        else:
+            await message.reply(
+                "📊 **Статус задач**\n\n"
+                "У вас нет активных задач инвайтинга.",
+                reply_markup=get_main_keyboard()
+            )
         return
     
-    text = "📊 **Статус задач**\n\n"
+    # Pagination settings
+    tasks_per_page = 5
+    total_pages = (len(tasks) + tasks_per_page - 1) // tasks_per_page
+    page = max(0, min(page, total_pages - 1))  # Ensure page is in valid range
+    
+    start_idx = page * tasks_per_page
+    end_idx = start_idx + tasks_per_page
+    page_tasks = tasks[start_idx:end_idx]
+    
+    text = f"📊 **Статус задач** (Страница {page + 1}/{total_pages})\n\n"
     
     status_icons = {
         'pending': '⏳',
@@ -419,7 +496,9 @@ async def show_tasks_status(client: Client, message: Message):
         'failed': '❌'
     }
     
-    for task in tasks[:10]:  # Limit to 10 tasks
+    buttons = []
+    
+    for task in page_tasks:
         icon = status_icons.get(task['status'], '❓')
         invited = task.get('invited_count', 0)
         limit = task.get('limit')
@@ -429,26 +508,67 @@ async def show_tasks_status(client: Client, message: Message):
         if task.get('rotate_sessions'):
             every = task.get('rotate_every', 0)
             rotate_info = f" | 🔄 Ротация: {'Да' if every == 0 else f'каждые {every}'}"
-            
-        text += f"{icon} {task['source_group']} → {task['target_group']}\n"
-        text += f"   Приглашено: {invited}{limit_text} | {task['status']}{rotate_info}\n\n"
-    
-    buttons = []
-    for task in tasks[:5]:  # Buttons for first 5 tasks
+        
+        task_text = f"{icon} {task['source_group']} → {task['target_group']}\n"
+        task_text += f"   Приглашено: {invited}{limit_text} | {task['status']}{rotate_info}"
+        text += task_text + "\n\n"
+        
+        # Add action buttons for each task
+        task_buttons = []
         if task['status'] == 'running':
-            buttons.append([InlineKeyboardButton(
-                f"⏹️ Остановить: {task['source_group'][:20]}",
+            task_buttons.append(InlineKeyboardButton(
+                f"⏹️ Остановить",
                 callback_data=f"invite_stop:{task['id']}"
-            )])
+            ))
         elif task['status'] == 'paused':
-            buttons.append([InlineKeyboardButton(
-                f"▶️ Продолжить: {task['source_group'][:20]}",
+            task_buttons.append(InlineKeyboardButton(
+                f"▶️ Продолжить",
                 callback_data=f"invite_resume:{task['id']}"
-            )])
+            ))
+        
+        # Add delete button for completed/failed/pending tasks
+        if task['status'] in ['completed', 'failed', 'pending']:
+            task_buttons.append(InlineKeyboardButton(
+                f"🗑️ Удалить",
+                callback_data=f"task_delete:{task['id']}"
+            ))
+        
+        if task_buttons:
+            buttons.append(task_buttons)
     
+    # Pagination buttons
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Назад", callback_data=f"tasks_page:{page - 1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"tasks_page:{page + 1}"))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    # Count completed/failed/pending tasks
+    clearable_count = sum(1 for t in tasks if t['status'] in ['completed', 'failed', 'pending'])
+    if clearable_count > 0:
+        buttons.append([InlineKeyboardButton(
+            f"🗑️ Очистить завершенные и ожидающие ({clearable_count})",
+            callback_data="tasks_clear_completed"
+        )])
+    
+    buttons.append([InlineKeyboardButton("🔄 Обновить", callback_data="tasks_refresh")])
     buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="tasks_back")])
     
-    await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
+    keyboard = InlineKeyboardMarkup(buttons)
+    
+    if edit_message:
+        try:
+            await message.edit_text(text, reply_markup=keyboard)
+        except MessageNotModified:
+            pass
+        except Exception:
+            # If edit fails, send new message
+            await message.reply(text, reply_markup=keyboard)
+    else:
+        await message.reply(text, reply_markup=keyboard)
 
 
 async def callback_handler(client: Client, callback_query):
@@ -648,6 +768,35 @@ async def callback_handler(client: Client, callback_query):
         )
         await callback_query.answer()
         return
+
+    if data == "settings_proxy":
+        settings = user_states[user_id].get('invite_settings', {})
+        settings['use_proxy'] = not settings.get('use_proxy', False)
+        user_states[user_id]['invite_settings'] = settings
+        
+        status = "включен" if settings['use_proxy'] else "выключен"
+        await callback_query.answer(f"Режим прокси {status}")
+        
+        await callback_query.edit_message_reply_markup(
+            reply_markup=get_settings_keyboard(settings)
+        )
+        return
+    
+    if data == "settings_filter_mode":
+        await handle_filter_mode_selection(client, callback_query)
+        return
+    
+    if data.startswith("filter_mode:"):
+        await handle_filter_mode_change(client, callback_query)
+        return
+    
+    if data == "settings_inactive_threshold_days":
+        user_states[user_id]['state'] = FSM_SETTINGS_INACTIVE_THRESHOLD_DAYS
+        await callback_query.message.reply(
+            "🛌 Введите количество дней неактивности для фильтрации (число) или 'нет' для отключения фильтра:"
+        )
+        await callback_query.answer()
+        return
     
     if data == "settings_sessions":
         await handle_session_selection(client, callback_query)
@@ -675,6 +824,7 @@ async def callback_handler(client: Client, callback_query):
 🔢 Каждые {settings.get('delay_every', 1)} инвайта
 🔢 Лимит: {settings.get('limit') or 'Без лимита'}
 🔄 Ротация сессий: {rotate_info}
+🌐 Прокси: {'✅' if settings.get('use_proxy') else '❌'}
 """
         
         await callback_query.edit_message_text(text, reply_markup=get_invite_menu_keyboard())
@@ -744,9 +894,36 @@ async def callback_handler(client: Client, callback_query):
     
     if data.startswith("delete_confirmed:"):
         from bot.session_handlers import delete_confirmed_callback
+    if data.startswith("delete_confirmed:"):
+        from bot.session_handlers import delete_confirmed_callback
         await delete_confirmed_callback(client, callback_query)
         return
     
+    if data.startswith("set_proxy:"):
+        from bot.session_handlers import set_proxy_callback
+        await set_proxy_callback(client, callback_query)
+        return
+
+    if data.startswith("test_proxy:"):
+        from bot.session_handlers import test_proxy_callback
+        await test_proxy_callback(client, callback_query)
+        return
+
+    if data.startswith("remove_proxy:"):
+        from bot.session_handlers import remove_proxy_callback
+        await remove_proxy_callback(client, callback_query)
+        return
+
+    if data.startswith("copy_proxy:"):
+        from bot.session_handlers import copy_proxy_callback
+        await copy_proxy_callback(client, callback_query)
+        return
+
+    if data.startswith("copy_proxy_confirm:"):
+        from bot.session_handlers import copy_proxy_confirm_callback
+        await copy_proxy_confirm_callback(client, callback_query)
+        return
+
     if data == "cancel_session_action":
         from bot.session_handlers import cancel_session_action_callback
         await cancel_session_action_callback(client, callback_query)
@@ -759,6 +936,25 @@ async def callback_handler(client: Client, callback_query):
         return
     
     # ============== Tasks Status ==============
+    
+    if data.startswith("task_delete:"):
+        await handle_task_delete(client, callback_query)
+        return
+    
+    if data.startswith("tasks_page:"):
+        page = int(data.split(":")[1])
+        await show_tasks_status(client, callback_query.message, page=page, edit_message=True)
+        await callback_query.answer()
+        return
+    
+    if data == "tasks_clear_completed":
+        await handle_clear_completed_tasks(client, callback_query)
+        return
+    
+    if data == "tasks_refresh":
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True)
+        await callback_query.answer("Список обновлен")
+        return
     
     if data == "tasks_back":
         user_states[user_id] = {"state": FSM_MAIN_MENU}
@@ -796,6 +992,10 @@ async def handle_invite_start(client: Client, callback_query):
     
     session_alias = inviting_sessions[0]
     
+    # Используем все назначенные сессии для инвайтинга, если не выбраны вручную
+    # Если в настройках есть selected_sessions, используем их, иначе все назначенные
+    available_sessions = settings.get('selected_sessions') or inviting_sessions
+    
     # Create task
     result = await api_client.create_task(
         user_id=user_id,
@@ -812,7 +1012,10 @@ async def handle_invite_start(client: Client, callback_query):
         limit=settings.get('limit'),
         rotate_sessions=settings.get('rotate_sessions', False),
         rotate_every=settings.get('rotate_every', 0),
-        available_sessions=inviting_sessions
+        use_proxy=settings.get('use_proxy', False),
+        available_sessions=available_sessions,
+        filter_mode=settings.get('filter_mode', 'all'),
+        inactive_threshold_days=settings.get('inactive_threshold_days')
     )
     
     if not result.get('success'):
@@ -887,7 +1090,7 @@ async def handle_invite_delete(client: Client, callback_query):
     if result.get('success'):
         await callback_query.answer("Задача удалена", show_alert=True)
         # Show tasks status again or go to main menu
-        await show_tasks_status(client, callback_query.message)
+        await show_tasks_status(client, callback_query.message, page=0)
         try:
             await callback_query.message.delete()
         except:
@@ -909,8 +1112,131 @@ async def handle_invite_refresh(client: Client, callback_query):
     else:
         keyboard = get_invite_paused_keyboard(task_id)
     
-    await callback_query.edit_message_text(text, reply_markup=keyboard)
-    await callback_query.answer("Статус обновлен")
+    try:
+        await callback_query.edit_message_text(text, reply_markup=keyboard)
+        await callback_query.answer("Статус обновлен")
+    except MessageNotModified:
+        # Сообщение не изменилось - это нормально, просто подтверждаем действие
+        await callback_query.answer("Статус актуален")
+
+
+async def handle_task_delete(client: Client, callback_query):
+    """Handle task deletion from tasks list."""
+    task_id = int(callback_query.data.split(":")[1])
+    
+    # Answer callback query immediately
+    try:
+        await callback_query.answer("⏳ Удаление...")
+    except Exception:
+        pass  # Ignore if query already expired
+    
+    result = await api_client.delete_task(task_id)
+    
+    if result.get('success'):
+        # Refresh tasks list
+        try:
+            await show_tasks_status(client, callback_query.message, page=0, edit_message=True)
+        except Exception as e:
+            logger.error(f"Error refreshing tasks list after delete: {e}")
+            # Try to answer again if query is still valid
+            try:
+                await callback_query.answer("✅ Задача удалена", show_alert=True)
+            except Exception:
+                pass  # Query expired, ignore
+    else:
+        # Try to answer with error if query is still valid
+        try:
+            await callback_query.answer(f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        except Exception:
+            pass  # Query expired, ignore
+
+
+async def handle_clear_completed_tasks(client: Client, callback_query):
+    """Handle clearing all completed and failed tasks."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Answer callback query immediately to prevent timeout
+    try:
+        await callback_query.answer("⏳ Удаление задач...")
+    except Exception:
+        pass  # Ignore if query already expired
+    
+    # Get all tasks
+    result = await api_client.get_user_tasks(user_id)
+    tasks = result.get('tasks', [])
+    
+    # Filter completed, failed and pending tasks
+    completed_tasks = [t for t in tasks if t['status'] in ['completed', 'failed', 'pending']]
+    
+    if not completed_tasks:
+        # Already answered, just refresh the list
+        try:
+            await show_tasks_status(client, callback_query.message, page=0, edit_message=True)
+        except Exception:
+            pass
+        return
+    
+    # Delete all completed/failed/pending tasks
+    deleted_count = 0
+    errors = []
+    
+    for task in completed_tasks:
+        result = await api_client.delete_task(task['id'])
+        if result.get('success'):
+            deleted_count += 1
+        else:
+            errors.append(f"Задача {task['id']}: {result.get('error', 'Unknown error')}")
+    
+    # Refresh tasks list
+    try:
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True)
+    except Exception as e:
+        logger.error(f"Error refreshing tasks list after clear: {e}")
+        # Try to send notification if query is still valid
+        try:
+            if deleted_count > 0:
+                await callback_query.answer(f"✅ Удалено задач: {deleted_count}", show_alert=True)
+            else:
+                error_msg = "Не удалось удалить задачи"
+                if errors:
+                    error_msg += f": {', '.join(errors[:3])}"
+                await callback_query.answer(f"❌ {error_msg}", show_alert=True)
+        except Exception:
+            pass  # Query expired, ignore
+
+
+async def handle_filter_mode_selection(client: Client, callback_query):
+    """Show filter mode selection menu."""
+    user_id = int(callback_query.from_user.id)
+    settings = user_states.get(user_id, {}).get('invite_settings', {})
+    current_mode = settings.get('filter_mode', 'all')
+
+    buttons = [
+        [InlineKeyboardButton(f"{'✅ ' if current_mode == 'all' else ''}Всех (без фильтра)", callback_data="filter_mode:all")],
+        [InlineKeyboardButton(f"{'✅ ' if current_mode == 'exclude_admins' else ''}Кроме админов", callback_data="filter_mode:exclude_admins")],
+        [InlineKeyboardButton(f"{'✅ ' if current_mode == 'exclude_inactive' else ''}Кроме неактивных", callback_data="filter_mode:exclude_inactive")],
+        [InlineKeyboardButton(f"{'✅ ' if current_mode == 'exclude_admins_and_inactive' else ''}Кроме админов и неактивных", callback_data="filter_mode:exclude_admins_and_inactive")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="settings_back")]
+    ]
+
+    await callback_query.edit_message_text(
+        "👥 **Настройка фильтрации пользователей**\n\nВыберите режим фильтрации:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await callback_query.answer()
+
+
+async def handle_filter_mode_change(client: Client, callback_query):
+    """Handle filter mode change."""
+    user_id = int(callback_query.from_user.id)
+    new_mode = callback_query.data.split(":")[1]
+
+    settings = user_states.get(user_id, {}).get('invite_settings', {})
+    settings['filter_mode'] = new_mode
+    user_states[user_id]['invite_settings'] = settings
+
+    await callback_query.answer(f"Режим фильтрации установлен: {new_mode}")
+    await handle_filter_mode_selection(client, callback_query) # Refresh menu
 
 
 async def handle_settings_menu(client: Client, callback_query):
@@ -959,3 +1285,32 @@ async def handle_toggle_session(client: Client, callback_query):
     keyboard = await get_session_select_keyboard(selected)
     await callback_query.edit_message_reply_markup(reply_markup=keyboard)
     await callback_query.answer()
+
+
+async def handle_session_proxy_input(client: Client, message: Message, text: str):
+    """Handle session proxy input."""
+    user_id = message.from_user.id
+
+    if user_id not in user_states or 'session_name' not in user_states[user_id]:
+        await message.reply("❌ Ошибка состояния. Попробуйте снова.")
+        return
+
+    session_name = user_states[user_id]['session_name']
+
+    try:
+        response = await api_client.set_session_proxy(session_name, text)
+        if response.get("success"):
+            proxy = response.get("proxy")
+            if proxy:
+                await message.reply(f"✅ Прокси для сессии **{session_name}** установлен!\n\nПрокси: `{proxy}`")
+            else:
+                await message.reply(f"🗑️ Прокси для сессии **{session_name}** удален!")
+        else:
+            await message.reply(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}")
+
+    except Exception as e:
+        await message.reply(f"❌ Ошибка при настройке прокси: {e}")
+    finally:
+        # Reset state
+        user_states[user_id] = {"state": FSM_MAIN_MENU}
+        await show_main_menu(client, message)

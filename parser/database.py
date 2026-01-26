@@ -28,7 +28,7 @@ class Database:
         self.conn = await aiosqlite.connect(self.db_path)
         self.conn.row_factory = aiosqlite.Row
         await self._create_tables()
-        logger.info(f"Database connected: {self.db_path}")
+        logger.info(f"База данных подключена: {self.db_path}")
     
     async def close(self):
         """Close database connection."""
@@ -49,7 +49,8 @@ class Database:
                 session_path TEXT NOT NULL,
                 is_active INTEGER DEFAULT 1,
                 user_id INTEGER,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                proxy TEXT
             );
             
             CREATE TABLE IF NOT EXISTS session_assignments (
@@ -80,6 +81,7 @@ class Database:
                 rotate_every INTEGER DEFAULT 0,
                 available_sessions TEXT,
                 current_offset INTEGER DEFAULT 0,
+                use_proxy INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 error_message TEXT
@@ -148,6 +150,36 @@ class Database:
         except:
             pass
 
+        # Migration: add proxy to sessions if missing
+        try:
+            await self.conn.execute("ALTER TABLE sessions ADD COLUMN proxy TEXT")
+        except:
+            pass
+
+        # Migration: add use_proxy to invite_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN use_proxy INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add failed_sessions to invite_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN failed_sessions TEXT")
+        except:
+            pass
+
+        # Migration: add filter_mode to invite_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN filter_mode TEXT DEFAULT 'all'")
+        except:
+            pass
+
+        # Migration: add inactive_threshold_days to invite_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN inactive_threshold_days INTEGER")
+        except:
+            pass
+
         await self.conn.commit()
     
     # ============== Sessions ==============
@@ -155,17 +187,17 @@ class Database:
     async def create_session(self, session: SessionMeta) -> int:
         """Create a new session record."""
         cursor = await self.conn.execute("""
-            INSERT INTO sessions (alias, api_id, api_hash, phone, session_path, is_active, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions (alias, api_id, api_hash, phone, session_path, is_active, user_id, proxy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (session.alias, session.api_id, session.api_hash, session.phone, 
-              session.session_path, 1 if session.is_active else 0, session.user_id))
+              session.session_path, 1 if session.is_active else 0, session.user_id, session.proxy))
         await self.conn.commit()
         return cursor.lastrowid
     
     async def get_all_sessions(self) -> List[SessionMeta]:
         """Get all sessions from database."""
         cursor = await self.conn.execute("""
-            SELECT id, alias, api_id, api_hash, phone, session_path, is_active, user_id, created_at
+            SELECT id, alias, api_id, api_hash, phone, session_path, is_active, user_id, created_at, proxy
             FROM sessions ORDER BY created_at DESC
         """)
         rows = await cursor.fetchall()
@@ -180,14 +212,15 @@ class Database:
                 session_path=row['session_path'],
                 is_active=bool(row['is_active']),
                 user_id=row['user_id'],
-                created_at=row['created_at']
+                created_at=row['created_at'],
+                proxy=row['proxy'] if 'proxy' in row.keys() else None
             ))
         return sessions
     
     async def get_session_by_alias(self, alias: str) -> Optional[SessionMeta]:
         """Get session by alias."""
         cursor = await self.conn.execute("""
-            SELECT id, alias, api_id, api_hash, phone, session_path, is_active, user_id, created_at
+            SELECT id, alias, api_id, api_hash, phone, session_path, is_active, user_id, created_at, proxy
             FROM sessions WHERE alias = ?
         """, (alias,))
         row = await cursor.fetchone()
@@ -201,7 +234,8 @@ class Database:
                 session_path=row['session_path'],
                 is_active=bool(row['is_active']),
                 user_id=row['user_id'],
-                created_at=row['created_at']
+                created_at=row['created_at'],
+                proxy=row['proxy'] if 'proxy' in row.keys() else None
             )
         return None
     
@@ -249,7 +283,7 @@ class Database:
                         is_active=True
                     )
                     await self.create_session(session)
-                    logger.info(f"Imported session: {alias}")
+                    logger.info(f"Импортирована сессия: {alias}")
     
     # ============== Session Assignments ==============
     
@@ -271,7 +305,7 @@ class Database:
         """Get all sessions assigned to a task."""
         cursor = await self.conn.execute("""
             SELECT s.id, s.alias, s.api_id, s.api_hash, s.phone, s.session_path, 
-                   s.is_active, s.user_id, s.created_at
+                   s.is_active, s.user_id, s.created_at, s.proxy
             FROM sessions s
             JOIN session_assignments sa ON s.id = sa.session_id
             WHERE sa.task = ? AND s.is_active = 1
@@ -287,7 +321,8 @@ class Database:
             session_path=row['session_path'],
             is_active=bool(row['is_active']),
             user_id=row['user_id'],
-            created_at=row['created_at']
+            created_at=row['created_at'],
+            proxy=row['proxy'] if 'proxy' in row.keys() else None
         ) for row in rows]
     
     async def get_assignments(self) -> Dict[str, List[str]]:
@@ -313,18 +348,19 @@ class Database:
     async def create_invite_task(self, task: InviteTask) -> int:
         """Create a new invite task."""
         available_sessions_str = ','.join(task.available_sessions) if task.available_sessions else ''
+        failed_sessions_str = ','.join(task.failed_sessions) if task.failed_sessions else ''
         cursor = await self.conn.execute("""
             INSERT INTO invite_tasks (
                 user_id, source_group_id, source_group_title, source_username,
                 target_group_id, target_group_title, target_username,
                 session_alias, invite_mode, status, invited_count, invite_limit, delay_seconds, delay_every,
-                rotate_sessions, rotate_every, available_sessions, current_offset
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rotate_sessions, rotate_every, use_proxy, available_sessions, failed_sessions, current_offset, filter_mode, inactive_threshold_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.user_id, task.source_group_id, task.source_group_title, task.source_username,
             task.target_group_id, task.target_group_title, task.target_username,
             task.session_alias, task.invite_mode, task.status, task.invited_count, task.limit, task.delay_seconds, task.delay_every,
-            1 if task.rotate_sessions else 0, task.rotate_every, available_sessions_str, task.current_offset
+            1 if task.rotate_sessions else 0, task.rotate_every, 1 if task.use_proxy else 0, available_sessions_str, failed_sessions_str, task.current_offset, task.filter_mode, task.inactive_threshold_days
         ))
         await self.conn.commit()
         return cursor.lastrowid
@@ -375,6 +411,12 @@ class Database:
         for key, value in kwargs.items():
             if key == 'available_sessions' and isinstance(value, list):
                 value = ','.join(value)
+            elif key == 'failed_sessions' and isinstance(value, list):
+                value = ','.join(value)
+            elif key == 'filter_mode':
+                value = str(value)
+            elif key == 'inactive_threshold_days':
+                value = int(value) if value is not None else None
             set_parts.append(f"{key} = ?")
             values.append(value)
         
@@ -393,6 +435,10 @@ class Database:
     def _row_to_invite_task(self, row) -> InviteTask:
         """Convert database row to InviteTask object."""
         available_sessions = row['available_sessions'].split(',') if row['available_sessions'] else []
+        failed_sessions = row['failed_sessions'].split(',') if ('failed_sessions' in row.keys() and row['failed_sessions']) else []
+        # Удаляем пустые строки из списков
+        available_sessions = [s for s in available_sessions if s]
+        failed_sessions = [s for s in failed_sessions if s]
         return InviteTask(
             id=row['id'],
             user_id=row['user_id'],
@@ -411,11 +457,15 @@ class Database:
             delay_every=row['delay_every'],
             rotate_sessions=bool(row['rotate_sessions']),
             rotate_every=row['rotate_every'] if 'rotate_every' in row.keys() else 0,
+            use_proxy=bool(row['use_proxy']) if 'use_proxy' in row.keys() else False,
             available_sessions=available_sessions,
+            failed_sessions=failed_sessions,
             current_offset=row['current_offset'],
             created_at=row['created_at'],
             updated_at=row['updated_at'],
-            error_message=row['error_message']
+            error_message=row['error_message'],
+            filter_mode=row['filter_mode'] if 'filter_mode' in row.keys() else 'all',
+            inactive_threshold_days=row['inactive_threshold_days'] if 'inactive_threshold_days' in row.keys() else None
         )
     
     # ============== User Groups ==============
@@ -513,3 +563,4 @@ class Database:
         """, (source_group_id, target_group_id))
         rows = await cursor.fetchall()
         return {row['user_telegram_id'] for row in rows}
+
