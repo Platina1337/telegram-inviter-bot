@@ -1,0 +1,248 @@
+{
+  "created_at": "2026-01-29T19:50:40.490678",
+  "updated_at": "2026-01-29T20:11:26.043251",
+  "metadata": {
+    "source_group_id": -1001478052106,
+    "source_group_title": "Работа в строительстве Москва и область , объявления!.",
+    "filter_admins": true,
+    "filter_inactive": true,
+    "inactive_days": 30,
+    "parsed_at": "2026-01-29T19:50:40.489474",
+    "last_filter": {
+      "type": "keep_with_username",
+      "date": "2026-01-29T20:11:26.043258",
+      "removed_count": 187
+    }
+  },
+  "users": [
+    {
+      "id": 8543992166,
+      "username": "ValentinSmirnov_C",
+      "first_name": "Валентин",
+      "last_name": "Смирнов"
+    },
+    {
+      "id": 8226700295,
+      "username": "olegka_7_7",
+      "first_name": "Олег",
+      "last_name": null
+    },
+    {
+      "id": 8001571746,
+      "username": "Kiril43108",
+      "first_name": "Кирилл",
+      "last_name": null
+    },
+    {
+      "id": 8542186875,
+      "username": "Nadezda_workHR",
+      "first_name": "Надежда",
+      "last_name": null
+    },
+    {
+      "id": 7940697625,
+      "username": "KONECKEL",
+      "first_name": "Андрей",
+      "last_name": "Шаров"
+    },
+    {
+      "id": 5694516151,
+      "username": "AdelinaGrekova",
+      "first_name": "Аделина",
+      "last_name": "Грекова"
+    },
+    {
+      "id": 6166229241,
+      "username": "AnGeLiNa222222222III",
+      "first_name": "Ангелина",
+      "last_name": "Маяковская"
+    },
+    {
+      "id": 7983237289,
+      "username": "ghriek",
+      "first_name": "Артем",
+      "last_name": null
+    },
+    {
+      "id": 8136095272,
+      "username": "Sofya537",
+      "first_name": "Софья",
+      "last_name": null
+    },
+    {
+      "id": 8328440241,
+      "username": "ZhannaVadimovna54",
+      "first_name": "Жанна",
+      "last_name": "Воронова"
+    },
+    {
+      "id": 8287670632,
+      "username": "NatashaKlimova7",
+      "first_name": "Наташа",
+      "last_name": "Климова"
+    },
+    {
+      "id": 8344500458,
+      "username": "RomaPopov999",
+      "first_name": "Рома",
+      "last_name": "Попов"
+    },
+    {
+      "id": 8435596368,
+      "username": "VityaGolubev418",
+      "first_name": "Витя",
+      "last_name": "Голубев"
+    },
+    {
+      "id": 403101032,
+      "username": "GezishT",
+      "first_name": "2017",
+      "last_name": null
+    },
+    {
+      "id": 8474249911,
+      "username": "FWygUpyfiu",
+      "first_name": "Мария",
+      "last_name": null
+    },
+    {
+      "id": 8525738010,
+      "username": "k_12w1",
+      "first_name": "К 12",
+      "last_name": null
+    },
+    {
+      "id": 8062410812,
+      "username": "Stanislav_buk",
+      "first_name": "Станислав",
+      "last_name": null
+    },
+    {
+      "id": 7850066877,
+      "username": "WinkinglyEmirate",
+      "first_name": "Кристина",
+      "last_name": null
+    },
+    {
+      "id": 8547937931,
+      "username": "ArsenijSidorov47",
+      "first_name": "Арсений",
+      "last_name": "Сидоров"
+    },
+    {
+      "id": 8076309832,
+      "username": "SashaErmakova867",
+      "first_name": "Саша",
+      "last_name": "Ермакова"
+    },
+    {
+      "id": 8209204200,
+      "username": "viktiodn",
+      "first_name": "Виктор",
+      "last_name": null
+    },
+    {
+      "id": 8532506300,
+      "username": "Tkachenko10",
+      "first_name": "Кирилл",
+      "last_name": "Ткаченко"
+    },
+    {
+      "id": 7588785845,
+      "username": "GennadijBelyaev_X6",
+      "first_name": "Геннадий",
+      "last_name": "Беляев"
+    },
+    {
+      "id": 8353212180,
+      "username": "SlavaFilippov_k",
+      "first_name": "Слава",
+      "last_name": "Филиппов"
+    },
+    {
+      "id": 8399230066,
+      "username": "polinavolkowa",
+      "first_name": "Полина",
+      "last_name": null
+    },
+    {
+      "id": 8316369374,
+      "username": "EvelinaAnisimova_K0",
+      "first_name": "Эля",
+      "last_name": null
+    },
+    {
+      "id": 7344772657,
+      "username": "w11re",
+      "first_name": "Злата",
+      "last_name": null
+    },
+    {
+      "id": 6697149501,
+      "username": "slava7895",
+      "first_name": "Слава",
+      "last_name": null
+    },
+    {
+      "id": 8559802568,
+      "username": "fhvsvjsdvks",
+      "first_name": "𝐍𝐢𝐠𝐡𝐭 𝐀𝐮𝐫𝐚 𝐂𝐡𝐚𝐫𝐦",
+      "last_name": null
+    },
+    {
+      "id": 8200585447,
+      "username": "yelyzaveta114",
+      "first_name": "Валерия",
+      "last_name": null
+    },
+    {
+      "id": 7455500467,
+      "username": "dmitriymatvienk",
+      "first_name": "Дмитрий",
+      "last_name": "Матвиенко"
+    },
+    {
+      "id": 8106882962,
+      "username": "Stla_22",
+      "first_name": "Стелла",
+      "last_name": null
+    },
+    {
+      "id": 8579353572,
+      "username": "viki7yb",
+      "first_name": "Вика",
+      "last_name": null
+    },
+    {
+      "id": 8066392959,
+      "username": "Lenusikqweee",
+      "first_name": "Лена",
+      "last_name": null
+    },
+    {
+      "id": 8400323347,
+      "username": "DaryaDanilova212",
+      "first_name": "Данил",
+      "last_name": "Данилов"
+    },
+    {
+      "id": 810670389,
+      "username": "Kazimir_Golubov",
+      "first_name": "Казимир",
+      "last_name": "Голубов"
+    },
+    {
+      "id": 7676436493,
+      "username": "evgeniyyy_001",
+      "first_name": "Евгений",
+      "last_name": null
+    },
+    {
+      "id": 8170527736,
+      "username": "lesi_onlain",
+      "first_name": "Леся",
+      "last_name": "| Удаленка С Кайфом"
+    }
+  ],
+  "count": 38
+}

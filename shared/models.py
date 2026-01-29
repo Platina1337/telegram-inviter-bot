@@ -49,7 +49,8 @@ class InviteTask:
     session_alias: str
     source_username: Optional[str] = None
     target_username: Optional[str] = None
-    invite_mode: str = "member_list"  # member_list (default) or message_based
+    invite_mode: str = "member_list"  # member_list (default), message_based, or from_file
+    file_source: Optional[str] = None  # File name for from_file mode
     status: str = "pending"  # pending, running, paused, completed, failed
     invited_count: int = 0
     limit: Optional[int] = None
@@ -69,6 +70,7 @@ class InviteTask:
     inactive_threshold_days: Optional[int] = None
 
 
+
 @dataclass
 class InviteSettings:
     """Settings for inviting users."""
@@ -79,3 +81,49 @@ class InviteSettings:
     rotate_every: int = 0
     use_proxy: bool = False
     session_aliases: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ParseTask:
+    """Represents a parsing task."""
+    id: int
+    user_id: int
+    file_name: str
+    source_group_id: int
+    source_group_title: str
+    session_alias: str
+    source_username: Optional[str] = None
+    source_type: str = "group"  # "group" or "channel" - determines parsing source type
+    status: str = "pending"  # pending, running, paused, completed, failed
+    parsed_count: int = 0
+    saved_count: int = 0  # Track how many users have been saved to file
+    limit: Optional[int] = None
+    delay_seconds: int = 2
+    delay_every: int = 1  # Apply delay after every N parsed users
+    save_every: int = 0  # Save to file after every N users (0 = only at end)
+    rotate_sessions: bool = False
+    rotate_every: int = 0  # 0 means disabled/only on error
+    use_proxy: bool = True
+    available_sessions: List[str] = field(default_factory=list)
+    failed_sessions: List[str] = field(default_factory=list)
+    current_offset: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error_message: Optional[str] = None
+    # Filter settings
+    filter_admins: bool = False
+    filter_inactive: bool = False
+    inactive_threshold_days: int = 30
+    # Parse mode: member_list (default), message_based, or channel_comments
+    parse_mode: str = "member_list"
+    # Keyword filter for message_based mode - only include users who wrote messages containing these keywords
+    keyword_filter: List[str] = field(default_factory=list)
+    # Exclude keywords - exclude users who wrote messages containing these words
+    exclude_keywords: List[str] = field(default_factory=list)
+    # Message-based mode specific settings
+    messages_limit: Optional[int] = None  # Limit by number of messages to process (for message_based mode)
+    delay_every_requests: int = 1  # Apply delay after every N API requests (for message_based mode)
+    rotate_every_requests: int = 0  # Rotate session after every N API requests (for message_based mode)
+    save_every_users: int = 0  # Save to file after every N unique users found (for message_based mode, 0 = only at end)
+    messages_offset: int = 0  # Offset for message history (for message_based mode resume)
+

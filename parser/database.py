@@ -12,6 +12,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
 from models import SessionMeta, InviteTask
+from .config import config
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,32 @@ class Database:
                 invited_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(task_id) REFERENCES invite_tasks(id) ON DELETE CASCADE
             );
+            
+            CREATE TABLE IF NOT EXISTS parse_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                source_group_id INTEGER NOT NULL,
+                source_group_title TEXT,
+                source_username TEXT,
+                session_alias TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                parsed_count INTEGER DEFAULT 0,
+                parse_limit INTEGER,
+                delay_seconds INTEGER DEFAULT 2,
+                rotate_sessions INTEGER DEFAULT 0,
+                rotate_every INTEGER DEFAULT 0,
+                available_sessions TEXT,
+                failed_sessions TEXT,
+                current_offset INTEGER DEFAULT 0,
+                use_proxy INTEGER DEFAULT 1,
+                filter_admins INTEGER DEFAULT 0,
+                filter_inactive INTEGER DEFAULT 0,
+                inactive_threshold_days INTEGER DEFAULT 30,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                error_message TEXT
+            );
         """)
         
         # Migration: add delay_every to invite_tasks if missing
@@ -180,7 +207,86 @@ class Database:
         except:
             pass
 
+        # Migration: add file_source to invite_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN file_source TEXT")
+        except:
+            pass
+
+        # Migration: add delay_every to parse_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN delay_every INTEGER DEFAULT 1")
+        except:
+            pass
+
+        # Migration: add save_every to parse_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN save_every INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add saved_count to parse_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN saved_count INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add parse_mode to parse_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN parse_mode TEXT DEFAULT 'member_list'")
+        except:
+            pass
+
+        # Migration: add keyword_filter to parse_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN keyword_filter TEXT")
+        except:
+            pass
+
+        # Migration: add exclude_keywords to parse_tasks if missing
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN exclude_keywords TEXT")
+        except:
+            pass
+
+        # Migration: add messages_limit to parse_tasks if missing (for message_based mode)
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN messages_limit INTEGER")
+        except:
+            pass
+
+        # Migration: add delay_every_requests to parse_tasks if missing (for message_based mode)
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN delay_every_requests INTEGER DEFAULT 1")
+        except:
+            pass
+
+        # Migration: add rotate_every_requests to parse_tasks if missing (for message_based mode)
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN rotate_every_requests INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add save_every_users to parse_tasks if missing (for message_based mode)
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN save_every_users INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add messages_offset to parse_tasks if missing (for message_based mode resume)
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN messages_offset INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add source_type to parse_tasks if missing (channel = комментарии под постами, group = группа)
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN source_type TEXT DEFAULT 'group'")
+        except:
+            pass
+
         await self.conn.commit()
+
     
     # ============== Sessions ==============
     
@@ -276,8 +382,8 @@ class Database:
                     session = SessionMeta(
                         id=0,
                         alias=alias,
-                        api_id=0,
-                        api_hash='',
+                        api_id=config.API_ID,
+                        api_hash=config.API_HASH,
                         phone='',
                         session_path=alias,
                         is_active=True
@@ -353,17 +459,18 @@ class Database:
             INSERT INTO invite_tasks (
                 user_id, source_group_id, source_group_title, source_username,
                 target_group_id, target_group_title, target_username,
-                session_alias, invite_mode, status, invited_count, invite_limit, delay_seconds, delay_every,
+                session_alias, invite_mode, file_source, status, invited_count, invite_limit, delay_seconds, delay_every,
                 rotate_sessions, rotate_every, use_proxy, available_sessions, failed_sessions, current_offset, filter_mode, inactive_threshold_days
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.user_id, task.source_group_id, task.source_group_title, task.source_username,
             task.target_group_id, task.target_group_title, task.target_username,
-            task.session_alias, task.invite_mode, task.status, task.invited_count, task.limit, task.delay_seconds, task.delay_every,
+            task.session_alias, task.invite_mode, task.file_source, task.status, task.invited_count, task.limit, task.delay_seconds, task.delay_every,
             1 if task.rotate_sessions else 0, task.rotate_every, 1 if task.use_proxy else 0, available_sessions_str, failed_sessions_str, task.current_offset, task.filter_mode, task.inactive_threshold_days
         ))
         await self.conn.commit()
         return cursor.lastrowid
+
     
     async def get_invite_task(self, task_id: int) -> Optional[InviteTask]:
         """Get invite task by ID."""
@@ -401,6 +508,10 @@ class Database:
     
     async def update_invite_task(self, task_id: int, **kwargs):
         """Update invite task fields."""
+        if self.conn is None:
+            logger.warning(f"Cannot update invite task {task_id}: database connection is closed")
+            return
+            
         if not kwargs:
             return
         
@@ -450,6 +561,7 @@ class Database:
             target_username=row['target_username'] if 'target_username' in row.keys() else None,
             session_alias=row['session_alias'],
             invite_mode=row['invite_mode'] if 'invite_mode' in row.keys() else 'member_list',
+            file_source=row['file_source'] if 'file_source' in row.keys() else None,
             status=row['status'],
             invited_count=row['invited_count'],
             limit=row['invite_limit'],
@@ -467,6 +579,7 @@ class Database:
             filter_mode=row['filter_mode'] if 'filter_mode' in row.keys() else 'all',
             inactive_threshold_days=row['inactive_threshold_days'] if 'inactive_threshold_days' in row.keys() else None
         )
+
     
     # ============== User Groups ==============
     
@@ -538,6 +651,10 @@ class Database:
                                 username: str = None, first_name: str = None,
                                 status: str = 'success', error_message: str = None):
         """Add invite history record."""
+        if self.conn is None:
+            logger.warning(f"Cannot add invite record for task {task_id}: database connection is closed")
+            return
+            
         await self.conn.execute("""
             INSERT INTO invite_history (task_id, user_telegram_id, username, first_name, status, error_message)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -563,4 +680,171 @@ class Database:
         """, (source_group_id, target_group_id))
         rows = await cursor.fetchall()
         return {row['user_telegram_id'] for row in rows}
+    
+    # ============== Parse Tasks ==============
+    
+    async def create_parse_task(self, task: 'ParseTask') -> int:
+        """Create a new parse task."""
+        from shared.models import ParseTask
+        
+        cursor = await self.conn.execute("""
+            INSERT INTO parse_tasks (
+                user_id, file_name, source_group_id, source_group_title, source_username,
+                session_alias, status, parsed_count, saved_count, parse_limit, delay_seconds, delay_every,
+                save_every, rotate_sessions, rotate_every, available_sessions, failed_sessions,
+                current_offset, use_proxy, filter_admins, filter_inactive,
+                inactive_threshold_days, error_message, parse_mode, keyword_filter, exclude_keywords,
+                messages_limit, delay_every_requests, rotate_every_requests, save_every_users, messages_offset,
+                source_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            task.user_id, task.file_name, task.source_group_id, task.source_group_title,
+            task.source_username, task.session_alias, task.status, task.parsed_count,
+            task.saved_count, task.limit, task.delay_seconds, task.delay_every, task.save_every,
+            1 if task.rotate_sessions else 0, task.rotate_every, ','.join(task.available_sessions),
+            ','.join(task.failed_sessions), task.current_offset,
+            1 if task.use_proxy else 0, 1 if task.filter_admins else 0,
+            1 if task.filter_inactive else 0, task.inactive_threshold_days,
+            task.error_message, task.parse_mode,
+            ','.join(task.keyword_filter) if task.keyword_filter else '',
+            ','.join(task.exclude_keywords) if task.exclude_keywords else '',
+            task.messages_limit, task.delay_every_requests, task.rotate_every_requests,
+            task.save_every_users, task.messages_offset,
+            getattr(task, 'source_type', 'group')
+        ))
+        await self.conn.commit()
+        return cursor.lastrowid
+    
+    async def get_parse_task(self, task_id: int) -> Optional['ParseTask']:
+        """Get parse task by ID."""
+        cursor = await self.conn.execute("""
+            SELECT * FROM parse_tasks WHERE id = ?
+        """, (task_id,))
+        row = await cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        return self._row_to_parse_task(row)
+    
+    async def update_parse_task(self, task_id: int, **kwargs):
+        """Update parse task fields."""
+        # Check if connection is still alive
+        if self.conn is None:
+            logger.warning(f"Cannot update parse task {task_id}: database connection is closed")
+            return
+        
+        allowed_fields = {
+            'status', 'parsed_count', 'saved_count', 'parse_limit', 'delay_seconds',
+            'save_every', 'rotate_sessions', 'rotate_every', 'available_sessions',
+            'failed_sessions', 'current_offset', 'use_proxy',
+            'session_alias', 'error_message', 'messages_limit', 'delay_every_requests',
+            'rotate_every_requests', 'save_every_users', 'messages_offset'
+        }
+        
+        updates = []
+        values = []
+        
+        for key, value in kwargs.items():
+            if key in allowed_fields:
+                if key in ['rotate_sessions', 'use_proxy']:
+                    value = 1 if value else 0
+                elif key in ['available_sessions', 'failed_sessions']:
+                    value = ','.join(value) if isinstance(value, list) else value
+                
+                updates.append(f"{key} = ?")
+                values.append(value)
+        
+        if not updates:
+            return
+        
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(task_id)
+        
+        query = f"UPDATE parse_tasks SET {', '.join(updates)} WHERE id = ?"
+        await self.conn.execute(query, values)
+        await self.conn.commit()
+    
+    async def delete_parse_task(self, task_id: int):
+        """Delete a parse task."""
+        await self.conn.execute("DELETE FROM parse_tasks WHERE id = ?", (task_id,))
+        await self.conn.commit()
+    
+    async def get_user_parse_tasks(self, user_id: int, status: str = None) -> List['ParseTask']:
+        """Get all parse tasks for a user."""
+        if status:
+            cursor = await self.conn.execute("""
+                SELECT * FROM parse_tasks WHERE user_id = ? AND status = ?
+                ORDER BY created_at DESC
+            """, (user_id, status))
+        else:
+            cursor = await self.conn.execute("""
+                SELECT * FROM parse_tasks WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+        
+        rows = await cursor.fetchall()
+        return [self._row_to_parse_task(row) for row in rows]
+    
+    async def get_running_parse_tasks(self) -> List['ParseTask']:
+        """Get all running parse tasks."""
+        cursor = await self.conn.execute("""
+            SELECT * FROM parse_tasks WHERE status = 'running'
+        """)
+        rows = await cursor.fetchall()
+        return [self._row_to_parse_task(row) for row in rows]
+    
+    def _row_to_parse_task(self, row) -> 'ParseTask':
+        """Convert database row to ParseTask object."""
+        from shared.models import ParseTask
+        
+        available_sessions = row['available_sessions'].split(',') if row['available_sessions'] else []
+        failed_sessions = row['failed_sessions'].split(',') if row['failed_sessions'] else []
+        
+        # Parse keyword_filter and exclude_keywords
+        keyword_filter = []
+        if 'keyword_filter' in row.keys() and row['keyword_filter']:
+            keyword_filter = [k.strip() for k in row['keyword_filter'].split(',') if k.strip()]
+        
+        exclude_keywords = []
+        if 'exclude_keywords' in row.keys() and row['exclude_keywords']:
+            exclude_keywords = [k.strip() for k in row['exclude_keywords'].split(',') if k.strip()]
+        
+        return ParseTask(
+            id=row['id'],
+            user_id=row['user_id'],
+            file_name=row['file_name'],
+            source_group_id=row['source_group_id'],
+            source_group_title=row['source_group_title'],
+            source_username=row['source_username'] if 'source_username' in row.keys() else None,
+            source_type=row['source_type'] if 'source_type' in row.keys() and row['source_type'] else 'group',
+            session_alias=row['session_alias'],
+            status=row['status'],
+            parsed_count=row['parsed_count'],
+            saved_count=row['saved_count'] if 'saved_count' in row.keys() else 0,
+            limit=row['parse_limit'],
+            delay_seconds=row['delay_seconds'],
+            delay_every=row['delay_every'] if 'delay_every' in row.keys() else 1,
+            save_every=row['save_every'] if 'save_every' in row.keys() else 0,
+            rotate_sessions=bool(row['rotate_sessions']),
+            rotate_every=row['rotate_every'],
+            use_proxy=bool(row['use_proxy']),
+            available_sessions=available_sessions,
+            failed_sessions=failed_sessions,
+            current_offset=row['current_offset'],
+            created_at=row['created_at'],
+            updated_at=row['updated_at'],
+            error_message=row['error_message'],
+            filter_admins=bool(row['filter_admins']),
+            filter_inactive=bool(row['filter_inactive']),
+            inactive_threshold_days=row['inactive_threshold_days'],
+            parse_mode=row['parse_mode'] if 'parse_mode' in row.keys() else 'member_list',
+            keyword_filter=keyword_filter,
+            exclude_keywords=exclude_keywords,
+            messages_limit=row['messages_limit'] if 'messages_limit' in row.keys() else None,
+            delay_every_requests=row['delay_every_requests'] if 'delay_every_requests' in row.keys() else 1,
+            rotate_every_requests=row['rotate_every_requests'] if 'rotate_every_requests' in row.keys() else 0,
+            save_every_users=row['save_every_users'] if 'save_every_users' in row.keys() else 0,
+            messages_offset=row['messages_offset'] if 'messages_offset' in row.keys() else 0
+        )
 

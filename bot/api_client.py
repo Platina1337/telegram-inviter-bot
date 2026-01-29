@@ -4,32 +4,88 @@ API client for communicating with the parser service.
 """
 import httpx
 import logging
+import time
+import asyncio
 from typing import Dict, List, Optional, Any
 
 from bot.config import config
 
 logger = logging.getLogger(__name__)
 
+# Cache storage for API responses
+_api_cache: Dict[str, tuple] = {}  # {key: (value, expire_time)}
+CACHE_TTL_SECONDS = 5  # Default cache TTL
+
+
+def _get_cached(key: str) -> Optional[Any]:
+    """Get value from cache if not expired."""
+    if key in _api_cache:
+        value, expire_time = _api_cache[key]
+        if time.time() < expire_time:
+            return value
+        del _api_cache[key]
+    return None
+
+
+def _set_cached(key: str, value: Any, ttl: int = CACHE_TTL_SECONDS):
+    """Set value in cache with TTL."""
+    _api_cache[key] = (value, time.time() + ttl)
+
+
+def _invalidate_cache(prefix: str = None):
+    """Invalidate cache entries. If prefix provided, only matching keys."""
+    global _api_cache
+    if prefix:
+        _api_cache = {k: v for k, v in _api_cache.items() if not k.startswith(prefix)}
+    else:
+        _api_cache.clear()
+
 
 class APIClient:
-    """HTTP client for the parser service API."""
+    """HTTP client for the parser service API with connection pooling."""
+    
+    _client: Optional[httpx.AsyncClient] = None
+    _client_lock: asyncio.Lock = None
     
     def __init__(self):
         self.base_url = config.PARSER_SERVICE_URL
         self.timeout = 60.0
     
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the shared HTTP client with connection pooling."""
+        if APIClient._client_lock is None:
+            APIClient._client_lock = asyncio.Lock()
+        
+        async with APIClient._client_lock:
+            if APIClient._client is None or APIClient._client.is_closed:
+                APIClient._client = httpx.AsyncClient(
+                    timeout=self.timeout,
+                    limits=httpx.Limits(
+                        max_keepalive_connections=10,
+                        max_connections=20,
+                        keepalive_expiry=30.0
+                    )
+                )
+        return APIClient._client
+    
+    async def close(self):
+        """Close the shared HTTP client."""
+        if APIClient._client and not APIClient._client.is_closed:
+            await APIClient._client.aclose()
+            APIClient._client = None
+    
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """Make HTTP request to API."""
+        """Make HTTP request to API using connection pool."""
         url = f"{self.base_url}{endpoint}"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.request(method, url, **kwargs)
-                
-                if response.status_code >= 400:
-                    logger.error(f"API error: {response.status_code} - {response.text}")
-                    return {"success": False, "error": f"HTTP {response.status_code}"}
-                
-                return response.json()
+            client = await self._get_client()
+            response = await client.request(method, url, **kwargs)
+            
+            if response.status_code >= 400:
+                logger.error(f"API error: {response.status_code} - {response.text}")
+                return {"success": False, "error": f"HTTP {response.status_code}"}
+            
+            return response.json()
         except httpx.TimeoutException:
             logger.error(f"Timeout requesting {url}")
             return {"success": False, "error": "Request timeout"}
@@ -43,8 +99,16 @@ class APIClient:
     # ============== Sessions ==============
     
     async def list_sessions(self) -> Dict[str, Any]:
-        """Get list of all sessions."""
-        return await self._make_request("GET", "/sessions")
+        """Get list of all sessions (cached for 5 seconds)."""
+        cache_key = "list_sessions"
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+        
+        result = await self._make_request("GET", "/sessions")
+        if result.get("success"):
+            _set_cached(cache_key, result, ttl=5)
+        return result
     
     async def add_session(self, alias: str, api_id: int, api_hash: str, phone: str) -> Dict[str, Any]:
         """Add a new session."""
@@ -124,12 +188,21 @@ class APIClient:
     # ============== User Groups History ==============
     
     async def get_user_groups(self, user_id: int) -> List[Dict]:
-        """Get user's source group history."""
+        """Get user's source group history (cached for 10 seconds)."""
+        cache_key = f"user_groups:{user_id}"
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+        
         result = await self._make_request("GET", f"/user/{user_id}/groups")
-        return result.get("groups", [])
+        groups = result.get("groups", [])
+        _set_cached(cache_key, groups, ttl=10)
+        return groups
     
     async def add_user_group(self, user_id: int, group_id: str, title: str, username: str = None) -> Dict[str, Any]:
         """Add group to user's history."""
+        # Invalidate cache
+        _invalidate_cache(f"user_groups:{user_id}")
         return await self._make_request("POST", f"/user/{user_id}/groups", json={
             "user_id": user_id,
             "group_id": group_id,
@@ -139,15 +212,25 @@ class APIClient:
     
     async def update_user_group_last_used(self, user_id: int, group_id: str) -> Dict[str, Any]:
         """Update last used timestamp for a group."""
+        _invalidate_cache(f"user_groups:{user_id}")
         return await self._make_request("PUT", f"/user/{user_id}/groups/{group_id}/last_used")
     
     async def get_user_target_groups(self, user_id: int) -> List[Dict]:
-        """Get user's target group history."""
+        """Get user's target group history (cached for 10 seconds)."""
+        cache_key = f"user_target_groups:{user_id}"
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+        
         result = await self._make_request("GET", f"/user/{user_id}/target_groups")
-        return result.get("groups", [])
+        groups = result.get("groups", [])
+        _set_cached(cache_key, groups, ttl=10)
+        return groups
     
     async def add_user_target_group(self, user_id: int, group_id: str, title: str, username: str = None) -> Dict[str, Any]:
         """Add target group to user's history."""
+        # Invalidate cache
+        _invalidate_cache(f"user_target_groups:{user_id}")
         return await self._make_request("POST", f"/user/{user_id}/target_groups", json={
             "user_id": user_id,
             "group_id": group_id,
@@ -157,6 +240,7 @@ class APIClient:
     
     async def update_user_target_group_last_used(self, user_id: int, group_id: str) -> Dict[str, Any]:
         """Update last used timestamp for a target group."""
+        _invalidate_cache(f"user_target_groups:{user_id}")
         return await self._make_request("PUT", f"/user/{user_id}/target_groups/{group_id}/last_used")
     
     # ============== Invite Tasks ==============
@@ -165,6 +249,7 @@ class APIClient:
                           target_group_id: int, target_group_title: str, session_alias: str,
                           source_username: str = None, target_username: str = None,
                           invite_mode: str = 'member_list',
+                          file_source: str = None,
                           delay_seconds: int = 30, delay_every: int = 1, limit: int = None, 
                           rotate_sessions: bool = False, rotate_every: int = 0,
                           use_proxy: bool = False,
@@ -182,6 +267,7 @@ class APIClient:
             "target_username": target_username,
             "session_alias": session_alias,
             "invite_mode": invite_mode,
+            "file_source": file_source,
             "delay_seconds": delay_seconds,
             "delay_every": delay_every,
             "limit": limit,
@@ -192,6 +278,7 @@ class APIClient:
             "filter_mode": filter_mode,
             "inactive_threshold_days": inactive_threshold_days
         })
+
     
     async def get_task(self, task_id: int) -> Dict[str, Any]:
         """Get task details."""
@@ -244,6 +331,78 @@ class APIClient:
     async def get_running_tasks(self) -> Dict[str, Any]:
         """Get all running tasks."""
         return await self._make_request("GET", "/running_tasks")
+    
+    # ============== Parse Tasks ==============
+    
+    async def create_parse_task(self, user_id: int, file_name: str,
+                                source_group_id: int, source_group_title: str,
+                                session_alias: str,
+                                source_username: str = None,
+                                source_type: str = "group",  # "group" or "channel"
+                                delay_seconds: int = 2, limit: int = None,
+                                save_every: int = 0,
+                                rotate_sessions: bool = False, rotate_every: int = 0,
+                                use_proxy: bool = True,
+                                available_sessions: List[str] = None,
+                                filter_admins: bool = False,
+                                filter_inactive: bool = False,
+                                inactive_threshold_days: int = 30,
+                                parse_mode: str = "member_list",
+                                keyword_filter: List[str] = None,
+                                exclude_keywords: List[str] = None,
+                                # Message-based mode specific params
+                                messages_limit: int = None,
+                                delay_every_requests: int = 1,
+                                rotate_every_requests: int = 0,
+                                save_every_users: int = 0) -> Dict[str, Any]:
+        """Create a new parse task."""
+        return await self._make_request("POST", "/parse_tasks", json={
+            "user_id": user_id,
+            "file_name": file_name,
+            "source_group_id": source_group_id,
+            "source_group_title": source_group_title,
+            "source_username": source_username,
+            "source_type": source_type,  # Add source type
+            "session_alias": session_alias,
+            "delay_seconds": delay_seconds,
+            "limit": limit,
+            "save_every": save_every,
+            "rotate_sessions": rotate_sessions,
+            "rotate_every": rotate_every,
+            "use_proxy": use_proxy,
+            "available_sessions": available_sessions or [],
+            "filter_admins": filter_admins,
+            "filter_inactive": filter_inactive,
+            "inactive_threshold_days": inactive_threshold_days,
+            "parse_mode": parse_mode,
+            "keyword_filter": keyword_filter or [],
+            "exclude_keywords": exclude_keywords or [],
+            "messages_limit": messages_limit,
+            "delay_every_requests": delay_every_requests,
+            "rotate_every_requests": rotate_every_requests,
+            "save_every_users": save_every_users
+        })
+    
+    async def get_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Get parse task details."""
+        return await self._make_request("GET", f"/parse_tasks/{task_id}")
+    
+    async def get_user_parse_tasks(self, user_id: int, status: str = None) -> Dict[str, Any]:
+        """Get all parse tasks for a user."""
+        params = {"status": status} if status else {}
+        return await self._make_request("GET", f"/parse_tasks/user/{user_id}", params=params)
+    
+    async def start_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Start a parse task."""
+        return await self._make_request("POST", f"/parse_tasks/{task_id}/start")
+    
+    async def stop_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Stop a parse task."""
+        return await self._make_request("POST", f"/parse_tasks/{task_id}/stop")
+    
+    async def delete_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Delete a parse task."""
+        return await self._make_request("DELETE", f"/parse_tasks/{task_id}")
     
     # ============== Health Check ==============
     

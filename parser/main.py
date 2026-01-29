@@ -4,6 +4,7 @@ FastAPI main application for the parser/worker service.
 """
 import os
 import sys
+import time
 import logging
 import asyncio
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from parser.config import config
 from parser.database import Database
 from parser.session_manager import SessionManager
 from parser.inviter_worker import InviterWorker
+from parser.parser_worker import ParserWorker
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
@@ -36,12 +38,13 @@ logger = logging.getLogger(__name__)
 db: Database = None
 session_manager: SessionManager = None
 inviter_worker: InviterWorker = None
+parser_worker: ParserWorker = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    global db, session_manager, inviter_worker
+    global db, session_manager, inviter_worker, parser_worker
     
     # Startup
     logger.info("Запуск сервиса Inviter Parser...")
@@ -58,20 +61,65 @@ async def lifespan(app: FastAPI):
     # Initialize inviter worker
     inviter_worker = InviterWorker(db, session_manager)
     
-    # Resume any running tasks
+    # Initialize parser worker
+    parser_worker = ParserWorker(db, session_manager)
+    
+    # Resume any running invite tasks
     running_tasks = await db.get_running_tasks()
     for task in running_tasks:
-        logger.info(f"Resuming task {task.id}")
+        logger.info(f"Resuming invite task {task.id}")
         await inviter_worker.start_invite_task(task.id)
-        logger.info(f"Возобновление задачи {task.id}")
+    
+    # Resume any running parse tasks
+    running_parse_tasks = await db.get_running_parse_tasks()
+    for task in running_parse_tasks:
+        logger.info(f"Resuming parse task {task.id}")
+        await parser_worker.start_parse_task(task.id)
     
     logger.info("Сервис Inviter Parser успешно запущен")
     
     yield
     
-    # Shutdown
+    # ============== Graceful Shutdown ==============
     logger.info("Остановка сервиса Inviter Parser...")
+    
+    # Stop all running invite tasks gracefully
+    try:
+        running_invite_tasks = await db.get_running_tasks()
+        for task in running_invite_tasks:
+            logger.info(f"Gracefully stopping invite task {task.id}...")
+            try:
+                await inviter_worker.stop_invite_task(task.id)
+                # Mark as paused so it can resume on restart
+                await db.update_invite_task(task.id, status='paused')
+                logger.info(f"Invite task {task.id} paused for graceful shutdown")
+            except Exception as e:
+                logger.error(f"Error stopping invite task {task.id}: {e}")
+    except Exception as e:
+        logger.error(f"Error during invite tasks shutdown: {e}")
+    
+    # Stop all running parse tasks gracefully
+    try:
+        running_parse_tasks = await db.get_running_parse_tasks()
+        for task in running_parse_tasks:
+            logger.info(f"Gracefully stopping parse task {task.id}...")
+            try:
+                await parser_worker.stop_parse_task(task.id)
+                # Mark as paused so it can resume on restart
+                await db.update_parse_task(task.id, status='paused')
+                logger.info(f"Parse task {task.id} paused for graceful shutdown")
+            except Exception as e:
+                logger.error(f"Error stopping parse task {task.id}: {e}")
+    except Exception as e:
+        logger.error(f"Error during parse tasks shutdown: {e}")
+    
+    # Give tasks time to finish current operation
+    await asyncio.sleep(1)
+    
+    # Stop session manager
     await session_manager.stop_all()
+    
+    # Close database
     await db.close()
     logger.info("Сервис Inviter Parser остановлен")
 
@@ -91,6 +139,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+from parser.rate_limiter import rate_limiter
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        # Use client IP as identifier (or default for local)
+        client_id = request.client.host if request.client else "default"
+        
+        is_allowed, retry_after = rate_limiter.is_allowed(client_id)
+        
+        if not is_allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many requests", "retry_after": retry_after},
+                headers={"Retry-After": str(int(retry_after) + 1)}
+            )
+        
+        return await call_next(request)
+
+app.add_middleware(RateLimitMiddleware)
+
+
+# Error handling middleware for centralized error logging
+import traceback
+
+class ErrorHandlingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as e:
+            # Log the full error with traceback
+            error_id = f"{int(time.time())}"
+            logger.error(f"[Error ID: {error_id}] Unhandled exception in {request.method} {request.url.path}: {e}")
+            logger.error(f"[Error ID: {error_id}] Traceback: {traceback.format_exc()}")
+            
+            # Return a generic error response
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "success": False,
+                    "error": "Internal server error",
+                    "error_id": error_id
+                }
+            )
+
+
+app.add_middleware(ErrorHandlingMiddleware)
 
 # ============== Pydantic Models ==============
 
@@ -142,6 +240,7 @@ class CreateTaskRequest(BaseModel):
     target_username: Optional[str] = None
     session_alias: str
     invite_mode: str = 'member_list'
+    file_source: Optional[str] = None
     delay_seconds: int = 30
     delay_every: int = 1
     limit: Optional[int] = None
@@ -157,7 +256,6 @@ class UpdateTaskRequest(BaseModel):
     delay_seconds: Optional[int] = None
     delay_every: Optional[int] = None
     limit: Optional[int] = None
-    rotate_sessions: Optional[bool] = None
     rotate_sessions: Optional[bool] = None
     rotate_every: Optional[int] = None
     use_proxy: Optional[bool] = None
@@ -175,6 +273,37 @@ class AddGroupRequest(BaseModel):
     username: Optional[str] = None
 
 
+class CreateParseTaskRequest(BaseModel):
+    user_id: int
+    file_name: str
+    source_group_id: int
+    source_group_title: str
+    source_username: Optional[str] = None
+    source_type: str = "group"  # "group" or "channel"
+    session_alias: str
+    delay_seconds: int = 2
+    limit: Optional[int] = None
+    save_every: int = 0  # Save to file after every N users (0 = only at end)
+    rotate_sessions: bool = False
+    rotate_every: int = 0
+    use_proxy: bool = True
+    available_sessions: List[str] = []
+    filter_admins: bool = False
+    filter_inactive: bool = False
+    inactive_threshold_days: int = 30
+    # Parse mode: member_list (default) or message_based
+    parse_mode: str = "member_list"
+    # Keyword filter for message_based mode
+    keyword_filter: List[str] = []
+    # Exclude keywords
+    exclude_keywords: List[str] = []
+    # Message-based mode specific fields
+    messages_limit: Optional[int] = None
+    delay_every_requests: int = 1
+    rotate_every_requests: int = 0
+    save_every_users: int = 0
+
+
 # ============== Session Endpoints ==============
 
 @app.get("/sessions")
@@ -189,7 +318,6 @@ async def list_sessions():
             {
                 "alias": s.alias,
                 "phone": s.phone,
-                "is_active": s.is_active,
                 "is_active": s.is_active,
                 "user_id": s.user_id,
                 "created_at": s.created_at,
@@ -254,7 +382,6 @@ async def sign_in(alias: str, request: SignInRequest):
 async def sign_in_password(alias: str, request: SignInPasswordRequest):
     """Sign in with 2FA password."""
     result = await session_manager.sign_in_with_password(alias, request.password)
-    result = await session_manager.sign_in_with_password(alias, request.password)
     return result
 
 
@@ -298,8 +425,8 @@ async def init_session(alias: str):
     new_session = SessionMeta(
         id=0,
         alias=alias,
-        api_id=0,
-        api_hash='',
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
         phone='',
         session_path=alias,
         is_active=False
@@ -327,11 +454,13 @@ async def get_group_info(session_alias: str, group_input: str):
         # Try to get chat
         try:
             chat = await client.get_chat(group_input)
-        except:
+        except Exception as e:
+            logger.debug(f"Failed to get chat by input '{group_input}': {e}")
             # Try as numeric ID
             try:
                 chat = await client.get_chat(int(group_input))
-            except:
+            except Exception as e2:
+                logger.debug(f"Failed to get chat by numeric ID '{group_input}': {e2}")
                 return {"success": False, "error": "Group not found"}
         
         return {
@@ -348,9 +477,9 @@ async def get_group_info(session_alias: str, group_input: str):
 
 
 @app.get("/groups/{session_alias}/members/{group_id}")
-async def get_group_members(session_alias: str, group_id: int, limit: int = 200):
+async def get_group_members(session_alias: str, group_id: int, limit: int = 200, offset: int = 0):
     """Get members from a group."""
-    members = await session_manager.get_group_members(session_alias, group_id, limit)
+    members = await session_manager.get_group_members(session_alias, group_id, limit, offset)
     return {"success": True, "members": members, "count": len(members)}
 
 
@@ -421,6 +550,7 @@ async def create_task(request: CreateTaskRequest):
         target_username=request.target_username,
         session_alias=request.session_alias,
         invite_mode=request.invite_mode,
+        file_source=request.file_source,
         delay_seconds=request.delay_seconds,
         delay_every=request.delay_every,
         limit=request.limit,
@@ -527,6 +657,152 @@ async def get_running_tasks():
     """Get all running tasks."""
     tasks = await inviter_worker.get_all_running_tasks()
     return {"success": True, "tasks": tasks}
+
+
+# ============== Parse Task Endpoints ==============
+
+@app.post("/parse_tasks")
+async def create_parse_task(request: CreateParseTaskRequest):
+    """Create a new parse task."""
+    from models import ParseTask
+    
+    task = ParseTask(
+        id=0,
+        user_id=request.user_id,
+        file_name=request.file_name,
+        source_group_id=request.source_group_id,
+        source_group_title=request.source_group_title,
+        source_username=request.source_username,
+        source_type=request.source_type,  # Add source type
+        session_alias=request.session_alias,
+        delay_seconds=request.delay_seconds,
+        limit=request.limit,
+        save_every=request.save_every,
+        rotate_sessions=request.rotate_sessions,
+        rotate_every=request.rotate_every,
+        use_proxy=request.use_proxy,
+        available_sessions=request.available_sessions,
+        filter_admins=request.filter_admins,
+        filter_inactive=request.filter_inactive,
+        inactive_threshold_days=request.inactive_threshold_days,
+        parse_mode=request.parse_mode,
+        keyword_filter=request.keyword_filter,
+        exclude_keywords=request.exclude_keywords,
+        messages_limit=request.messages_limit,
+        delay_every_requests=request.delay_every_requests,
+        rotate_every_requests=request.rotate_every_requests,
+        save_every_users=request.save_every_users
+    )
+    task_id = await db.create_parse_task(task)
+    return {"success": True, "task_id": task_id}
+
+
+@app.get("/parse_tasks/{task_id}")
+async def get_parse_task(task_id: int):
+    """Get parse task details."""
+    task = await db.get_parse_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return {
+        "success": True,
+        "task": {
+            "id": task.id,
+            "user_id": task.user_id,
+            "file_name": task.file_name,
+            "source_group": task.source_group_title,
+            "source_type": getattr(task, 'source_type', 'group'),
+            "session": task.session_alias,
+            "status": task.status,
+            "parsed_count": task.parsed_count,
+            "saved_count": task.saved_count,
+            "limit": task.limit,
+            "delay_seconds": task.delay_seconds,
+            "save_every": task.save_every,
+            "rotate_sessions": task.rotate_sessions,
+            "rotate_every": task.rotate_every,
+            "use_proxy": task.use_proxy,
+            "available_sessions": task.available_sessions,
+            "filter_admins": task.filter_admins,
+            "filter_inactive": task.filter_inactive,
+            "inactive_threshold_days": task.inactive_threshold_days,
+            "parse_mode": task.parse_mode,
+            "keyword_filter": task.keyword_filter,
+            "exclude_keywords": task.exclude_keywords,
+            "messages_limit": task.messages_limit,
+            "delay_every_requests": task.delay_every_requests,
+            "rotate_every_requests": task.rotate_every_requests,
+            "save_every_users": task.save_every_users,
+            "messages_offset": task.messages_offset,
+            "created_at": task.created_at,
+            "error_message": task.error_message
+        }
+    }
+
+
+@app.get("/parse_tasks/user/{user_id}")
+async def get_user_parse_tasks(user_id: int, status: Optional[str] = None):
+    """Get all parse tasks for a user."""
+    tasks = await db.get_user_parse_tasks(user_id, status)
+    return {
+        "success": True,
+        "tasks": [
+            {
+                "id": t.id,
+                "file_name": t.file_name,
+                "source_group": t.source_group_title,
+                "session": t.session_alias,
+                "status": t.status,
+                "parsed_count": t.parsed_count,
+                "saved_count": t.saved_count,
+                "limit": t.limit,
+                "save_every": t.save_every,
+                "rotate_sessions": t.rotate_sessions,
+                "rotate_every": t.rotate_every,
+                "use_proxy": t.use_proxy,
+                "available_sessions": t.available_sessions,
+                "filter_admins": t.filter_admins,
+                "filter_inactive": t.filter_inactive,
+                "inactive_threshold_days": t.inactive_threshold_days,
+                "parse_mode": t.parse_mode,
+                "keyword_filter": t.keyword_filter,
+                "exclude_keywords": t.exclude_keywords,
+                "messages_limit": t.messages_limit,
+                "delay_every_requests": t.delay_every_requests,
+                "rotate_every_requests": t.rotate_every_requests,
+                "save_every_users": t.save_every_users,
+                "messages_offset": t.messages_offset,
+                "created_at": t.created_at
+            }
+            for t in tasks
+        ]
+    }
+
+
+@app.post("/parse_tasks/{task_id}/start")
+async def start_parse_task(task_id: int):
+    """Start a parse task."""
+    result = await parser_worker.start_parse_task(task_id)
+    return result
+
+
+@app.post("/parse_tasks/{task_id}/stop")
+async def stop_parse_task(task_id: int):
+    """Stop a parse task."""
+    result = await parser_worker.stop_parse_task(task_id)
+    return result
+
+
+@app.delete("/parse_tasks/{task_id}")
+async def delete_parse_task(task_id: int):
+    """Delete a parse task."""
+    # Stop if running
+    task = await db.get_parse_task(task_id)
+    if task and task.status == 'running':
+        await db.update_parse_task(task_id, status='paused')
+    
+    await db.delete_parse_task(task_id)
+    return {"success": True}
 
 
 # ============== Health Check ==============

@@ -51,6 +51,11 @@ class InviterWorker:
                 self._run_message_based_invite_task(task_id)
             )
             logger.info(f"Запущена задача инвайтинга по сообщениям {task_id} (сессия: {task.session_alias}{proxy_str})")
+        elif task.invite_mode == 'from_file':
+            self.running_tasks[task_id] = asyncio.create_task(
+                self._run_from_file_invite_task(task_id)
+            )
+            logger.info(f"Запущена задача инвайтинга из файла {task_id} (файл: {task.file_source}, сессия: {task.session_alias}{proxy_str})")
         else:
             self.running_tasks[task_id] = asyncio.create_task(
                 self._run_invite_task(task_id)
@@ -58,6 +63,7 @@ class InviterWorker:
             logger.info(f"Запущена задача инвайтинга по списку участников {task_id} (сессия: {task.session_alias}{proxy_str})")
         
         return {"success": True, "task_id": task_id, "status": "running"}
+
     
     async def stop_invite_task(self, task_id: int) -> Dict[str, Any]:
         """Stop an invite task."""
@@ -1281,7 +1287,8 @@ class InviterWorker:
                 task.target_group_id,
                 source_username=task.source_username,
                 target_username=task.target_username,
-                use_proxy=task.use_proxy
+                use_proxy=task.use_proxy,
+                invite_mode=task.invite_mode
             )
 
             if validation.get('success'):
@@ -1347,3 +1354,314 @@ class InviterWorker:
         """Get all running tasks."""
         tasks = await self.db.get_running_tasks()
         return [await self.get_task_status(t.id) for t in tasks]
+    
+    async def _run_from_file_invite_task(self, task_id: int):
+        """Invite users from a file."""
+        session_consecutive_invites = 0
+        try:
+            task = await self.db.get_invite_task(task_id)
+            if not task:
+                logger.error(f"Задача {task_id} не найдена")
+                return
+            
+            if not task.file_source:
+                logger.error(f"Задача {task_id}: file_source не указан")
+                await self.db.update_invite_task(
+                    task_id,
+                    status='failed',
+                    error_message="Файл-источник не указан"
+                )
+                return
+            
+            # Load users from file
+            import sys
+            import os
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
+            from user_files_manager import UserFilesManager
+            
+            manager = UserFilesManager()
+            
+            try:
+                file_data = manager.load_users_from_file(task.file_source)
+                users = file_data['users']
+                metadata = file_data.get('metadata', {})
+                
+                logger.info(f"Задача {task_id}: Загружено {len(users)} пользователей из файла {task.file_source}")
+                logger.info(f"Задача {task_id}: Метаданные файла: {metadata}")
+            except FileNotFoundError:
+                error_msg = f"Файл {task.file_source} не найден"
+                logger.error(f"Задача {task_id}: {error_msg}")
+                await self.db.update_invite_task(
+                    task_id,
+                    status='failed',
+                    error_message=error_msg
+                )
+                await self._notify_user(task.user_id, f"❌ **Ошибка**: {error_msg}")
+                return
+            except Exception as e:
+                error_msg = f"Ошибка при загрузке файла: {e}"
+                logger.error(f"Задача {task_id}: {error_msg}")
+                await self.db.update_invite_task(
+                    task_id,
+                    status='failed',
+                    error_message=error_msg
+                )
+                await self._notify_user(task.user_id, f"❌ **Ошибка**: {error_msg}")
+                return
+            
+            # Get already invited users
+            invited_ids = await self.db.get_invited_user_ids(
+                -1,  # Special source_group_id for file-based invites
+                task.target_group_id
+            )
+            
+            # Process users from file
+            current_index = task.current_offset
+            
+            while current_index < len(users) and not self._stop_flags.get(task_id, False):
+                task = await self.db.get_invite_task(task_id)
+                if not task:
+                    logger.error(f"Задача {task_id} не найдена")
+                    break
+                
+                # Check if limit reached
+                if task.limit and task.invited_count >= task.limit:
+                    logger.info(f"Задача {task_id} достигла лимита: {task.invited_count}/{task.limit}")
+                    break
+                
+                # Get session client
+                proxy_info = await self.session_manager.get_proxy_info(task.session_alias, task.use_proxy)
+                proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
+                
+                client = await self.session_manager.get_client(task.session_alias, use_proxy=task.use_proxy)
+                if not client:
+                    logger.error(f"Не удалось получить клиент для сессии {task.session_alias}{proxy_str}")
+                    
+                    if task.rotate_sessions and task.available_sessions:
+                        logger.info(f"Сессия {task.session_alias} недоступна, попытка ротации...")
+                        new_session = await self._rotate_session(task)
+                        if new_session:
+                            session_consecutive_invites = 0
+                            continue
+                    
+                    error_msg = f"Сессия {task.session_alias} недоступна"
+                    await self.db.update_invite_task(
+                        task_id,
+                        status='failed',
+                        error_message=error_msg
+                    )
+                    break
+                
+                # Process batch of users
+                batch_size = min(50, len(users) - current_index)
+                batch_users = users[current_index:current_index + batch_size]
+                
+                processed_in_batch = 0
+                for user in batch_users:
+                    processed_in_batch += 1
+                    if self._stop_flags.get(task_id, False):
+                        await self.db.update_invite_task(
+                            task_id,
+                            current_offset=current_index + processed_in_batch
+                        )
+                        break
+                    
+                    user_id = user.get('id')
+                    user_username = user.get('username')
+                    
+                    # Need at least user_id or username to invite
+                    if not user_id and not user_username:
+                        continue
+                    
+                    # Skip already invited (only if we have user_id)
+                    if user_id and user_id in invited_ids:
+                        continue
+                    
+                    user_first_name = user.get('first_name')
+                    # Use user_id for invite, or fall back to username
+                    invite_target = user_id if user_id else user_username
+                    user_info = self._format_user_info(user_id, user_username, user_first_name)
+                    
+                    # PRE-CHECK: Check if user is ALREADY in target group
+                    # Only works reliably with user_id, skip for username-only cases
+                    if user_id:
+                        try:
+                            target_member = await client.get_chat_member(task.target_group_id, user_id)
+                            raw_status = target_member.status
+                            status = getattr(raw_status, "name", str(raw_status)).upper()
+                            
+                            if status != 'LEFT':
+                                logger.info(f"Задача {task_id}: Пользователь {user_info} имеет статус {status} в целевой группе. Пропуск.")
+                                
+                                status_code = 'banned_in_target' if status in ['KICKED', 'BANNED'] else 'already_in_target'
+                                
+                                await self.db.add_invite_record(
+                                    task_id, user_id,
+                                    username=user_username,
+                                    first_name=user_first_name,
+                                    status=status_code
+                                )
+                                await asyncio.sleep(0.1)
+                                continue
+                        except Exception:
+                            pass
+                    
+                    # Check limit
+                    if task.limit and task.invited_count >= task.limit:
+                        logger.info(f"Задача {task_id} достигла лимита: {task.invited_count}/{task.limit}")
+                        break
+                    
+                    # Check session rotation limit
+                    if task.rotate_sessions and task.rotate_every > 0 and session_consecutive_invites >= task.rotate_every:
+                        logger.info(f"Задача {task_id}: Сессия {task.session_alias} достигла {session_consecutive_invites} приглашений. Ротация...")
+                        
+                        offset_to_save = current_index + max(processed_in_batch - 1, 0)
+                        await self.db.update_invite_task(
+                            task_id,
+                            current_offset=offset_to_save
+                        )
+                        current_index = offset_to_save
+                        
+                        new_session = await self._rotate_session(task)
+                        if new_session:
+                            session_consecutive_invites = 0
+                            processed_in_batch = -1
+                            break
+                        else:
+                            logger.warning(f"Задача {task_id}: Ротация по счетчику не удалась. Продолжаем с текущей сессией {task.session_alias}")
+                            session_consecutive_invites = 0
+                    
+                    # Invite the user
+                    result = await self.session_manager.invite_user(
+                        task.session_alias,
+                        task.target_group_id,
+                        invite_target,
+                        target_username=task.target_username,
+                        use_proxy=task.use_proxy
+                    )
+                    
+                    if result.get('success'):
+                        # Use user_id if available, otherwise use username as identifier
+                        record_user_id = user_id if user_id else f"@{user_username}"
+                        await self.db.add_invite_record(
+                            task_id, record_user_id,
+                            username=user_username,
+                            first_name=user_first_name,
+                            status='success'
+                        )
+                        await self.db.update_invite_task(
+                            task_id,
+                            invited_count=task.invited_count + 1
+                        )
+                        task.invited_count += 1
+                        session_consecutive_invites += 1
+                        logger.info(f"Задача {task_id}: Приглашен пользователь {user_info} ({task.invited_count}/{task.limit or '∞'}) (сессия: {task.session_alias}{proxy_str})")
+                        
+                        # Delay
+                        if task.invited_count % task.delay_every == 0:
+                            min_delay = max(1, int(task.delay_seconds * 0.8))
+                            max_delay = int(task.delay_seconds * 1.2)
+                            actual_delay = random.randint(min_delay, max_delay)
+                            
+                            logger.info(f"Задача {task_id}: Ожидание {actual_delay}с после {task.delay_every} приглашений")
+                            await asyncio.sleep(actual_delay)
+                        else:
+                            await asyncio.sleep(random.randint(2, 5))
+                    
+                    elif result.get('flood_wait'):
+                        wait_time = result['flood_wait']
+                        logger.warning(f"FloodWait {wait_time}s for session {task.session_alias}")
+                        
+                        if task.rotate_sessions and task.available_sessions:
+                            logger.info(f"FloodWait on {task.session_alias}, attempting rotation...")
+                            new_session = await self._rotate_session(task)
+                            if new_session:
+                                logger.info(f"Rotated to session {new_session} due to FloodWait")
+                                session_consecutive_invites = 0
+                                break
+                        
+                        await asyncio.sleep(min(wait_time, 300))
+                    
+                    elif result.get('fatal'):
+                        error_detail = result.get('error', 'Unknown error')
+                        logger.error(f"Критическая ошибка с сессией {task.session_alias}{proxy_str}: {error_detail}")
+                        
+                        current_failing = task.session_alias
+                        
+                        if current_failing not in task.failed_sessions:
+                            task.failed_sessions.append(current_failing)
+                            await self.db.update_invite_task(task_id, failed_sessions=task.failed_sessions)
+                        
+                        if task.rotate_sessions and task.available_sessions:
+                            new_session = await self._rotate_session(task)
+                            if new_session:
+                                session_consecutive_invites = 0
+                                processed_in_batch -= 1
+                                break
+                            else:
+                                error_msg = f"Критическая ошибка: {error_detail}. Ротация не удалась."
+                                await self.db.update_invite_task(task_id, status='failed', error_message=error_msg)
+                                await self._notify_user(task.user_id, f"❌ **Задача остановлена**: {error_msg}")
+                                return
+                        else:
+                            error_msg = f"Критическая ошибка: {error_detail}"
+                            await self.db.update_invite_task(task_id, status='failed', error_message=error_msg)
+                            await self._notify_user(task.user_id, f"❌ **Задача остановлена**: {error_msg}")
+                            return
+                    
+                    elif result.get('skip'):
+                        await self.db.add_invite_record(
+                            task_id, user_id,
+                            username=user_username,
+                            first_name=user_first_name,
+                            status='skipped',
+                            error_message=result.get('error')
+                        )
+                    
+                    else:
+                        await self.db.add_invite_record(
+                            task_id, user_id,
+                            username=user_username,
+                            first_name=user_first_name,
+                            status='failed',
+                            error_message=result.get('error')
+                        )
+                
+                # Update offset
+                if processed_in_batch > 0:
+                    current_index += processed_in_batch
+                    await self.db.update_invite_task(
+                        task_id,
+                        current_offset=current_index
+                    )
+            
+            # Task finished
+            task = await self.db.get_invite_task(task_id)
+            if task and task.status == 'running':
+                logger.info(f"Задача {task_id} завершена корректно")
+                await self.db.update_invite_task(task_id, status='completed')
+                
+                await self._notify_user(
+                    task.user_id,
+                    f"✅ **Задача инвайтинга из файла завершена**\n\n"
+                    f"📊 **Итоговые результаты:**\n"
+                    f"• Файл-источник: {task.file_source}\n"
+                    f"• Группа-цель: {task.target_group_title}\n"
+                    f"• Всего добавлено: {task.invited_count} участников\n"
+                    f"• Лимит: {task.limit or 'Неограничен'}\n\n"
+                    f"🎯 **Задача выполнена успешно!**"
+                )
+        
+        except asyncio.CancelledError:
+            logger.info(f"Задача {task_id} была отменена")
+        except Exception as e:
+            logger.error(f"Ошибка в задаче инвайтинга из файла {task_id}: {e}", exc_info=True)
+            await self.db.update_invite_task(
+                task_id,
+                status='failed',
+                error_message=str(e)
+            )
+        finally:
+            self._stop_flags.pop(task_id, None)
+            self.running_tasks.pop(task_id, None)
+

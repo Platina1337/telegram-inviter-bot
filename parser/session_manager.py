@@ -154,7 +154,11 @@ class SessionManager:
         """Load all active sessions from DB and create Pyrogram Clients."""
         sessions = await self.db.get_all_sessions()
         for session in sessions:
-            if session.is_active and session.api_id and session.api_hash:
+            # Use session credentials or fallback to config
+            api_id = session.api_id or config.API_ID
+            api_hash = session.api_hash or config.API_HASH
+            
+            if session.is_active and api_id and api_hash:
                 alias = os.path.basename(session.alias)
                 session_dir_abs = os.path.abspath(self.session_dir)
                 session_path = os.path.join(session_dir_abs, alias)
@@ -162,8 +166,8 @@ class SessionManager:
                 if alias not in self.clients:
                     self.clients[alias] = Client(
                         name=session_path,
-                        api_id=session.api_id,
-                        api_hash=session.api_hash,
+                        api_id=api_id,
+                        api_hash=api_hash,
                         phone_number=session.phone if session.phone else None
                     )
                     logger.info(f"Загружен клиент для сессии: {alias}")
@@ -329,14 +333,18 @@ class SessionManager:
                 del self.clients[alias]
         
         if alias not in self.clients:
-            if session and session.api_id and session.api_hash:
+            # Use session credentials or fallback to config
+            api_id = session.api_id or config.API_ID
+            api_hash = session.api_hash or config.API_HASH
+            
+            if session and api_id and api_hash:
                 session_dir_abs = os.path.abspath(self.session_dir)
                 session_path = os.path.join(session_dir_abs, alias)
                 
                 client = Client(
                     name=session_path,
-                    api_id=session.api_id,
-                    api_hash=session.api_hash,
+                    api_id=api_id,
+                    api_hash=api_hash,
                     workdir=session_dir_abs,
                     phone_number=session.phone if session.phone else None,
                     proxy=target_proxy
@@ -490,7 +498,7 @@ class SessionManager:
                     if num < 0 or num > 255:
                         return False
                 return True
-        except:
+        except ValueError:
             pass
         
         # Check IPv6 format (simplified check - contains colons)
@@ -706,10 +714,15 @@ class SessionManager:
             return None
 
         members = []
-        current_idx = 0
         try:
+            # Try to get total members count for logging
+            chat_info = await client.get_chat(group_id)
+            total_count = getattr(chat_info, 'members_count', 'unknown')
+            logger.info(f"Getting members for {group_id}. Total members in chat: {total_count}")
+
             # Note: client.get_chat_members does not support integer offset natively for pagination
-            # We iterate and skip manually. This can be slow for very large offsets.
+            # We iterate and skip manually.
+            current_idx = 0
             async for member in client.get_chat_members(group_id):
                 if current_idx < offset:
                     current_idx += 1
@@ -723,9 +736,12 @@ class SessionManager:
                         'id': member.user.id,
                         'username': member.user.username,
                         'first_name': member.user.first_name,
-                        'last_name': member.user.last_name
+                        'last_name': member.user.last_name,
+                        # Add status/is_admin if needed for filtering
+                        'status': str(member.user.status) if member.user.status else None,
+                        'is_admin': member.status in ['administrator', 'creator']
                     })
-
+                
                 current_idx += 1
             
             return members
@@ -734,8 +750,17 @@ class SessionManager:
             logger.error(f"Error getting members from {group_id}: {e}")
             return None
     
-    async def invite_user(self, alias: str, target_group_id: int, user_id: int, target_username: str = None, use_proxy: bool = True) -> Dict[str, Any]:
-        """Invite a single user to a group."""
+    async def invite_user(self, alias: str, target_group_id: int, user_id, target_username: str = None, use_proxy: bool = True) -> Dict[str, Any]:
+        """
+        Invite a single user to a group.
+        
+        Args:
+            alias: Session alias to use
+            target_group_id: Target group ID
+            user_id: User ID (int) or username (str with '@' prefix) to invite
+            target_username: Target group username (optional, for resolving)
+            use_proxy: Whether to use proxy
+        """
         client = await self.get_client(alias, use_proxy=use_proxy)
         if not client:
             return {"success": False, "error": "Session not available"}
@@ -743,7 +768,14 @@ class SessionManager:
         # Логируем информацию о прокси
         proxy_info = await self.get_proxy_info(alias, use_proxy)
         proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
-        logger.info(f"Приглашение пользователя {user_id} в группу {target_group_id} (сессия: {alias}{proxy_str})")
+        
+        # Determine if we're inviting by ID or username
+        if isinstance(user_id, str):
+            user_target = user_id if user_id.startswith('@') else f"@{user_id}"
+            logger.info(f"Приглашение пользователя {user_target} (по username) в группу {target_group_id} (сессия: {alias}{proxy_str})")
+        else:
+            user_target = user_id
+            logger.info(f"Приглашение пользователя {user_id} в группу {target_group_id} (сессия: {alias}{proxy_str})")
 
         # Убеждаемся, что peer разрешён перед приглашением
         chat = await ensure_peer_resolved(client, target_group_id, target_username)
@@ -754,13 +786,13 @@ class SessionManager:
             return {"success": False, "error": f"Cannot resolve target group {target_group_id} (username: {target_username}) - session has no access", "fatal": True}
 
         try:
-            await client.add_chat_members(target_group_id, user_id)
-            logger.debug(f"Успешно приглашен пользователь {user_id} в группу {target_group_id} (сессия: {alias}{proxy_str})")
+            await client.add_chat_members(target_group_id, user_target)
+            logger.debug(f"Успешно приглашен пользователь {user_target} в группу {target_group_id} (сессия: {alias}{proxy_str})")
             return {"success": True, "user_id": user_id}
         except UserAlreadyParticipant:
             return {"success": True, "user_id": user_id, "already_member": True}
         except FloodWait as e:
-            logger.warning(f"FloodWait {e.value} секунд при приглашении пользователя {user_id} (сессия: {alias}{proxy_str})")
+            logger.warning(f"FloodWait {e.value} секунд при приглашении пользователя {user_target} (сессия: {alias}{proxy_str})")
             return {"success": False, "error": f"FloodWait: {e.value} seconds", "flood_wait": e.value}
         except UserPrivacyRestricted:
             return {"success": False, "error": "User privacy restricted", "skip": True}
@@ -775,7 +807,12 @@ class SessionManager:
             logger.error(f"Peer flood - сессия временно заблокирована (сессия: {alias}{proxy_str})")
             return {"success": False, "error": "Peer flood - session temporarily blocked", "fatal": True}
         except Exception as e:
-            logger.error(f"Ошибка при приглашении пользователя {user_id} (сессия: {alias}{proxy_str}): {e}")
+            error_str = str(e)
+            # Handle case when username cannot be resolved
+            if "USERNAME_NOT_OCCUPIED" in error_str or "USERNAME_INVALID" in error_str:
+                logger.warning(f"Username {user_target} не найден или недействителен (сессия: {alias}{proxy_str})")
+                return {"success": False, "error": "Username not found or invalid", "skip": True}
+            logger.error(f"Ошибка при приглашении пользователя {user_target} (сессия: {alias}{proxy_str}): {e}")
             return {"success": False, "error": str(e)}
     
     async def start_all(self) -> Dict[str, str]:
@@ -866,7 +903,8 @@ class SessionManager:
             return False
 
     async def validate_session_capability(self, alias: str, source_group_id: int, target_group_id: int, 
-                                        source_username: str = None, target_username: str = None, use_proxy: bool = True) -> Dict[str, Any]:
+                                        source_username: str = None, target_username: str = None, use_proxy: bool = True,
+                                        invite_mode: str = 'member_list') -> Dict[str, Any]:
         """
         Validate if a session can perform inviting from source to target.
         Returns detailed error reason if validation fails.
@@ -875,25 +913,27 @@ class SessionManager:
         if not client:
             return {"success": False, "reason": "Session not available or invalid"}
 
-        # Check Source Access
-        source_chat = await ensure_peer_resolved(client, source_group_id, source_username)
-        if not source_chat:
-            return {"success": False, "reason": f"No access to source group {source_group_id} (username: {source_username}): peer not resolved"}
+        # Skip source validation for file-based invites
+        if invite_mode != 'from_file':
+            # Check Source Access
+            source_chat = await ensure_peer_resolved(client, source_group_id, source_username)
+            if not source_chat:
+                return {"success": False, "reason": f"No access to source group {source_group_id} (username: {source_username}): peer not resolved"}
 
-        # Пытаемся вступить в источник, чтобы иметь право парсить участников
-        await self.join_chat_if_needed(client, source_group_id, source_username)
+            # Пытаемся вступить в источник, чтобы иметь право парсить участников
+            await self.join_chat_if_needed(client, source_group_id, source_username)
 
-        # ПРОВЕРКА ВИДИМОСТИ УЧАСТНИКОВ
-        # Если в группе есть люди, сессия должна их видеть
-        source_chat_info = await client.get_chat(source_group_id)
-        total_members = getattr(source_chat_info, 'members_count', 0)
-        
-        if total_members > 5: # Если группа не совсем пустая
-            test_members = await self.get_group_members(alias, source_group_id, limit=10)
-            if not test_members or len(test_members) < 2:
-                # Если видим слишком мало при большом общем количестве - значит обзор ограничен
-                logger.warning(f"⚠️ Сессия {alias} имеет ограниченный обзор группы {source_group_id}. Видит {len(test_members) if test_members else 0} из {total_members}")
-                return {"success": False, "reason": "Ограниченный обзор участников (возможно, список скрыт для не-админов)"}
+            # ПРОВЕРКА ВИДИМОСТИ УЧАСТНИКОВ
+            # Если в группе есть люди, сессия должна их видеть
+            source_chat_info = await client.get_chat(source_group_id)
+            total_members = getattr(source_chat_info, 'members_count', 0)
+            
+            if total_members > 5: # Если группа не совсем пустая
+                test_members = await self.get_group_members(alias, source_group_id, limit=10)
+                if not test_members or len(test_members) < 2:
+                    # Если видим слишком мало при большом общем количестве - значит обзор ограничен
+                    logger.warning(f"⚠️ Сессия {alias} имеет ограниченный обзор группы {source_group_id}. Видит {len(test_members) if test_members else 0} из {total_members}")
+                    return {"success": False, "reason": "Ограниченный обзор участников (возможно, список скрыт для не-админов)"}
 
         # Check Target Access
         target_chat = await ensure_peer_resolved(client, target_group_id, target_username)

@@ -1,0 +1,87 @@
+{
+  "created_at": "2026-01-28T23:55:46.844023",
+  "updated_at": "2026-01-28T23:55:46.844034",
+  "metadata": {
+    "source_group_id": -1001478052106,
+    "source_group_title": "Работа в строительстве Москва и область , объявления!.",
+    "filter_admins": true,
+    "filter_inactive": true,
+    "inactive_days": 30,
+    "parsed_at": "2026-01-28T23:55:46.842862"
+  },
+  "users": [
+    {
+      "id": 821854001,
+      "username": "Stela_Grinina",
+      "first_name": "Женя",
+      "last_name": null
+    },
+    {
+      "id": 7676436493,
+      "username": "evgeniyyy_001",
+      "first_name": "Евгений",
+      "last_name": null
+    },
+    {
+      "id": 7864443224,
+      "username": null,
+      "first_name": "Алиша",
+      "last_name": "Алиева"
+    },
+    {
+      "id": 8008217637,
+      "username": "NikolajMironov045",
+      "first_name": "Николай",
+      "last_name": "Миронов"
+    },
+    {
+      "id": 8141940335,
+      "username": "robinarethusa",
+      "first_name": "Кирия",
+      "last_name": "Сукунова"
+    },
+    {
+      "id": 8439214434,
+      "username": "aliskakikiso4ka",
+      "first_name": "Alisa_manager",
+      "last_name": null
+    },
+    {
+      "id": 8497127643,
+      "username": null,
+      "first_name": "Ольга",
+      "last_name": null
+    },
+    {
+      "id": 8516064959,
+      "username": null,
+      "first_name": "Регистрация",
+      "last_name": "Сертификат"
+    },
+    {
+      "id": 8579353572,
+      "username": "viki7yb",
+      "first_name": "Вика",
+      "last_name": null
+    },
+    {
+      "id": 7490036907,
+      "username": null,
+      "first_name": "РЕСТИР ПРОВЕРКА",
+      "last_name": null
+    },
+    {
+      "id": 7645574904,
+      "username": "MakarVolkov2",
+      "first_name": "Макар",
+      "last_name": "Волков"
+    },
+    {
+      "id": 7880359127,
+      "username": "demid456",
+      "first_name": "Артем",
+      "last_name": null
+    }
+  ],
+  "count": 12
+}
