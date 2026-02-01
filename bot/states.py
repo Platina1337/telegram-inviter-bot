@@ -251,7 +251,6 @@ def get_invite_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for running invite task."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"invite_pause:{task_id}")],
-        [InlineKeyboardButton("⏹️ Остановить", callback_data=f"invite_stop:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"invite_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")]
     ])
@@ -261,7 +260,6 @@ def get_invite_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for paused invite task."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"invite_resume:{task_id}")],
-        [InlineKeyboardButton("⏹️ Остановить", callback_data=f"invite_stop:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"invite_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")]
     ])
@@ -270,8 +268,7 @@ def get_invite_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
 def get_parse_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for running parse task."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"parse_stop:{task_id}")],
-        [InlineKeyboardButton("⏹️ Остановить", callback_data=f"parse_stop:{task_id}")],
+        [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"parse_pause:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"parse_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")]
     ])
@@ -281,7 +278,6 @@ def get_parse_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for paused parse task."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"parse_resume:{task_id}")],
-        [InlineKeyboardButton("⏹️ Остановить", callback_data=f"parse_stop:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"parse_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")]
     ])
@@ -403,6 +399,8 @@ def get_task_assignment_keyboard(session_alias: str) -> InlineKeyboardMarkup:
 
 def format_invite_status(task_data: Dict) -> str:
     """Format invite task status message."""
+    from datetime import datetime, timedelta
+    
     status_icons = {
         'pending': '⏳',
         'running': '🚀',
@@ -411,8 +409,17 @@ def format_invite_status(task_data: Dict) -> str:
         'failed': '❌'
     }
     
+    status_names = {
+        'pending': 'Ожидание',
+        'running': 'Выполняется',
+        'paused': 'Приостановлено',
+        'completed': 'Завершено',
+        'failed': 'Ошибка'
+    }
+    
     status = task_data.get('status', 'pending')
     icon = status_icons.get(status, '❓')
+    status_text = status_names.get(status, status.capitalize())
     
     invited = task_data.get('invited_count', 0)
     limit = task_data.get('limit')
@@ -449,6 +456,46 @@ def format_invite_status(task_data: Dict) -> str:
     if (not source_display or source_display == 'N/A') and task_data.get('file_source'):
         source_display = f"📄 {task_data['file_source']}"
 
+    # Calculate time until next action
+    time_until_next = ""
+    last_action_time = task_data.get('last_action_time')
+    delay_seconds = task_data.get('delay_seconds', 30)
+    delay_every = task_data.get('delay_every', 1)
+    
+    if status == 'running' and last_action_time and invited > 0:
+        try:
+            last_action = datetime.fromisoformat(last_action_time)
+            now = datetime.now()
+            elapsed = (now - last_action).total_seconds()
+            
+            # Calculate when next delay will be applied
+            # Delay is applied every delay_every invites
+            invites_since_last_delay = invited % delay_every
+            
+            if invites_since_last_delay == 0:
+                # Just had a delay, show remaining time
+                remaining = max(0, delay_seconds - elapsed)
+                if remaining > 0:
+                    time_until_next = f"\n⏱️ След. действие через: {int(remaining)} сек"
+                else:
+                    time_until_next = f"\n⏱️ Готов к действию"
+            else:
+                # No delay applied yet, show small delay or ready
+                # Small delay is 2-5 seconds between invites
+                small_delay = 5  # max small delay
+                remaining = max(0, small_delay - elapsed)
+                if remaining > 0:
+                    time_until_next = f"\n⏱️ След. действие через: {int(remaining)} сек"
+                else:
+                    time_until_next = f"\n⏱️ Готов к действию"
+        except:
+            pass
+    
+    # Show current active session if rotation is enabled
+    current_session_info = ""
+    if task_data.get('rotate_sessions') and task_data.get('current_session'):
+        current_session_info = f"\n🔐 Активная сессия: {task_data['current_session']}"
+
     text = f"""
 {icon} **Статус инвайтинга**
 
@@ -456,15 +503,15 @@ def format_invite_status(task_data: Dict) -> str:
 📥 Цель: {task_data.get('target_group', 'N/A')}
 
 👥 Приглашено: {invited}{limit_text}
-⏱️ Задержка: ~{task_data.get('delay_seconds', 30)} сек (каждые {task_data.get('delay_every', 1)} инв.)
+⏱️ Задержка: ~{task_data.get('delay_seconds', 30)} сек (каждые {task_data.get('delay_every', 1)} инв.){time_until_next}
 🔐 Сессия: {task_data.get('session', 'N/A')}
-📋 Сессии: {sessions_text}
+📋 Сессии: {sessions_text}{current_session_info}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 👥 Фильтр: {filter_mode_text}
 🛌 Неактивен >: {inactive_threshold_text}
 
-📋 Статус: {status.capitalize()}
+📋 Статус: {status_text}
 """
     
     if task_data.get('error_message'):
@@ -475,6 +522,8 @@ def format_invite_status(task_data: Dict) -> str:
 
 def format_parse_status(task_data: Dict) -> str:
     """Format parse task status message."""
+    from datetime import datetime
+    
     status = task_data.get('status', 'unknown')
     status_icons = {
         'pending': '⏳',
@@ -483,7 +532,15 @@ def format_parse_status(task_data: Dict) -> str:
         'completed': '✅',
         'failed': '❌'
     }
+    status_names = {
+        'pending': 'Ожидание',
+        'running': 'Выполняется',
+        'paused': 'Приостановлено',
+        'completed': 'Завершено',
+        'failed': 'Ошибка'
+    }
     icon = status_icons.get(status, '❓')
+    status_text = status_names.get(status, status.capitalize())
     
     parse_mode = task_data.get('parse_mode', 'member_list')
     source_type = task_data.get('source_type', 'group')
@@ -505,6 +562,44 @@ def format_parse_status(task_data: Dict) -> str:
         sessions_text = ', '.join(available_sessions)
     else:
         sessions_text = task_data.get('session', 'N/A')
+    
+    # Calculate time until next action
+    time_until_next = ""
+    last_action_time = task_data.get('last_action_time')
+    delay_seconds = task_data.get('delay_seconds', 2)
+    delay_every = task_data.get('delay_every', 1)
+    
+    if status == 'running' and last_action_time and parsed > 0:
+        try:
+            last_action = datetime.fromisoformat(last_action_time)
+            now = datetime.now()
+            elapsed = (now - last_action).total_seconds()
+            
+            # Calculate when next delay will be applied
+            parses_since_last_delay = parsed % delay_every
+            
+            if parses_since_last_delay == 0:
+                # Just had a delay, show remaining time
+                remaining = max(0, delay_seconds - elapsed)
+                if remaining > 0:
+                    time_until_next = f" (через {int(remaining)} сек)"
+                else:
+                    time_until_next = " (готов)"
+            else:
+                # No delay applied yet, small delay between requests
+                small_delay = 2  # typical small delay
+                remaining = max(0, small_delay - elapsed)
+                if remaining > 0:
+                    time_until_next = f" (через {int(remaining)} сек)"
+                else:
+                    time_until_next = " (готов)"
+        except:
+            pass
+    
+    # Show current active session if rotation is enabled
+    current_session_display = task_data.get('session', 'N/A')
+    if task_data.get('rotate_sessions') and task_data.get('current_session'):
+        current_session_display = f"{task_data['current_session']} ⚡"
         
     # Filters
     filters = []
@@ -546,8 +641,8 @@ def format_parse_status(task_data: Dict) -> str:
 👥 Найдено пользователей: {parsed}
 💾 Сохранено в файл: {saved}
 📥 Сохранение: {save_every_text}
-⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек каждые {delay_every_requests} запр.
-🔐 Текущая сессия: {task_data.get('session', 'N/A')}
+⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек каждые {delay_every_requests} запр.{time_until_next}
+🔐 Текущая сессия: {current_session_display}
 📋 Все сессии: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
@@ -572,15 +667,15 @@ def format_parse_status(task_data: Dict) -> str:
 👥 Спаршено: {parsed}{limit_text}
 💾 Сохранено в файл: {saved}
 📥 Сохранение: {save_every_text}
-⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек
-🔐 Текущая сессия: {task_data.get('session', 'N/A')}
+⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек{time_until_next}
+🔐 Текущая сессия: {current_session_display}
 📋 Все сессии: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 🚫 Исключать: {filter_text}
 """
     
-    text += f"\n📋 Статус: {status.capitalize()}"
+    text += f"\n📋 Статус: {status_text}"
     
     if task_data.get('error_message'):
         text += f"\n⚠️ Ошибка: {task_data['error_message']}"

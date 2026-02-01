@@ -285,6 +285,42 @@ class Database:
         except:
             pass
 
+        # Migration: add last_heartbeat to invite_tasks for tracking task health
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN last_heartbeat TEXT")
+        except:
+            pass
+
+        # Migration: add last_heartbeat to parse_tasks for tracking task health
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN last_heartbeat TEXT")
+        except:
+            pass
+
+        # Migration: add last_action_time to invite_tasks for delay countdown
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN last_action_time TEXT")
+        except:
+            pass
+
+        # Migration: add current_session to invite_tasks for rotation tracking
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN current_session TEXT")
+        except:
+            pass
+
+        # Migration: add last_action_time to parse_tasks for delay countdown
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN last_action_time TEXT")
+        except:
+            pass
+
+        # Migration: add current_session to parse_tasks for rotation tracking
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN current_session TEXT")
+        except:
+            pass
+
         await self.conn.commit()
 
     
@@ -577,7 +613,9 @@ class Database:
             updated_at=row['updated_at'],
             error_message=row['error_message'],
             filter_mode=row['filter_mode'] if 'filter_mode' in row.keys() else 'all',
-            inactive_threshold_days=row['inactive_threshold_days'] if 'inactive_threshold_days' in row.keys() else None
+            inactive_threshold_days=row['inactive_threshold_days'] if 'inactive_threshold_days' in row.keys() else None,
+            last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
+            current_session=row['current_session'] if 'current_session' in row.keys() else None
         )
 
     
@@ -845,6 +883,8 @@ class Database:
             delay_every_requests=row['delay_every_requests'] if 'delay_every_requests' in row.keys() else 1,
             rotate_every_requests=row['rotate_every_requests'] if 'rotate_every_requests' in row.keys() else 0,
             save_every_users=row['save_every_users'] if 'save_every_users' in row.keys() else 0,
-            messages_offset=row['messages_offset'] if 'messages_offset' in row.keys() else 0
+            messages_offset=row['messages_offset'] if 'messages_offset' in row.keys() else 0,
+            last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
+            current_session=row['current_session'] if 'current_session' in row.keys() else None
         )
 

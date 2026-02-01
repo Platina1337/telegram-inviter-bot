@@ -865,9 +865,11 @@ async def show_invite_settings(client: Client, message: Message):
     )
 
 
-async def show_tasks_status(client: Client, message: Message, page: int = 0, edit_message: bool = False):
+async def show_tasks_status(client: Client, message: Message, page: int = 0, edit_message: bool = False, user_id: int = None):
     """Show all tasks status with pagination."""
-    user_id = message.from_user.id
+    # Use provided user_id or get from message
+    if user_id is None:
+        user_id = message.from_user.id if message.from_user else message.chat.id
     
     # Get invite tasks
     invite_result = await api_client.get_user_tasks(user_id)
@@ -916,61 +918,70 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
         'failed': '❌'
     }
     
+    status_names = {
+        'pending': 'ожидание',
+        'running': 'выполняется',
+        'paused': 'пауза',
+        'completed': 'завершено',
+        'failed': 'ошибка'
+    }
+    
     buttons = []
     
-    for task in page_tasks:
+    for idx, task in enumerate(page_tasks, start=start_idx + 1):
         icon = status_icons.get(task['status'], '❓')
+        status_text = status_names.get(task['status'], task['status'])
         is_parse = task.get('type') == 'parse'
         
         if is_parse:
             parsed = task.get('parsed_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
-            task_name = f"🔍 {task.get('source_group')} → 📁 {task.get('file_name')}"
+            task_name = f"🔍 {task.get('source_group', 'N/A')[:30]} → 📁 {task.get('file_name', 'N/A')}"
             progress_text = f"   Спаршено: {parsed}{limit_text}"
         else:
             invited = task.get('invited_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
-            task_name = f"👥 {task.get('source_group')} → {task.get('target_group')}"
+            task_name = f"👥 {task.get('source_group', 'N/A')[:20]} → {task.get('target_group', 'N/A')[:20]}"
             progress_text = f"   Приглашено: {invited}{limit_text}"
         
         rotate_info = ""
         if task.get('rotate_sessions'):
             every = task.get('rotate_every', 0)
-            rotate_info = f" | 🔄 Ротация: {'Да' if every == 0 else f'каждые {every}'}"
+            rotate_info = f" | 🔄 каждые {every}" if every > 0 else " | 🔄 Да"
         
-        task_text = f"{icon} **{task_name}**\n"
-        task_text += f"{progress_text} | {task['status']}{rotate_info}"
+        # Numbered task text
+        task_text = f"**{idx}.** {icon} {task_name}\n"
+        task_text += f"{progress_text} | {status_text}{rotate_info}"
         text += task_text + "\n\n"
         
-        # Add action buttons for each task
+        # Add action buttons for each task with numbers
         task_buttons = []
         prefix = "parse" if is_parse else "invite"
         
         if task['status'] == 'running':
             task_buttons.append(InlineKeyboardButton(
-                f"⏹️ Остановить",
+                f"{idx}. ⏹️ Стоп",
                 callback_data=f"{prefix}_stop:{task['id']}"
             ))
         elif task['status'] == 'paused':
             task_buttons.append(InlineKeyboardButton(
-                f"▶️ Продолжить",
+                f"{idx}. ▶️ Продолжить",
                 callback_data=f"{prefix}_resume:{task['id']}"
             ))
         
-        # Add detail/refresh button
+        # Add detail button
         task_buttons.append(InlineKeyboardButton(
-            f"🔍 Детали",
+            f"{idx}. 🔍 Детали",
             callback_data=f"{prefix}_status:{task['id']}"
         ))
         
-        # Add delete button for completed/failed/pending tasks
-        if task['status'] in ['completed', 'failed', 'pending']:
-            task_buttons.append(InlineKeyboardButton(
-                f"🗑️ Удалить",
-                callback_data=f"{prefix}_delete:{task['id']}"
-            ))
+        # Add delete button for all tasks (not just completed/failed/pending)
+        task_buttons.append(InlineKeyboardButton(
+            f"{idx}. 🗑️",
+            callback_data=f"{prefix}_delete:{task['id']}"
+        ))
         
         if task_buttons:
             buttons.append(task_buttons)
@@ -987,11 +998,24 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
     
     # Count completed/failed/pending tasks
     clearable_count = sum(1 for t in tasks if t['status'] in ['completed', 'failed', 'pending'])
+    
+    # Clear buttons row
+    clear_buttons = []
     if clearable_count > 0:
-        buttons.append([InlineKeyboardButton(
-            f"🗑️ Очистить завершенные и ожидающие ({clearable_count})",
+        clear_buttons.append(InlineKeyboardButton(
+            f"🗑️ Завершённые ({clearable_count})",
             callback_data="tasks_clear_completed"
-        )])
+        ))
+    
+    # Always add "Clear all" button if there are tasks
+    if len(tasks) > 0:
+        clear_buttons.append(InlineKeyboardButton(
+            f"🗑️ Все ({len(tasks)})",
+            callback_data="tasks_clear_all"
+        ))
+    
+    if clear_buttons:
+        buttons.append(clear_buttons)
     
     buttons.append([InlineKeyboardButton("🔄 Обновить", callback_data="tasks_refresh")])
     buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="tasks_back")])
@@ -1032,7 +1056,7 @@ async def callback_handler(client: Client, callback_query):
         return
     
     if data.startswith("invite_pause:"):
-        await handle_invite_stop(client, callback_query)  # Same as stop for now
+        await handle_invite_pause(client, callback_query)
         return
     
     if data.startswith("invite_resume:"):
@@ -1420,8 +1444,12 @@ async def callback_handler(client: Client, callback_query):
         await handle_clear_completed_tasks(client, callback_query)
         return
     
+    if data == "tasks_clear_all":
+        await handle_clear_all_tasks(client, callback_query)
+        return
+    
     if data == "tasks_refresh":
-        await show_tasks_status(client, callback_query.message, page=0, edit_message=True)
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id)
         await callback_query.answer("Список обновлен")
         return
     
@@ -1455,6 +1483,10 @@ async def callback_handler(client: Client, callback_query):
 
     if data.startswith("parse_status:"):
         await handle_parse_status(client, callback_query)
+        return
+
+    if data.startswith("parse_pause:"):
+        await handle_parse_pause(client, callback_query)
         return
 
     if data.startswith("parse_stop:"):
@@ -2204,6 +2236,25 @@ async def handle_invite_stop(client: Client, callback_query):
         await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
 
 
+async def handle_invite_pause(client: Client, callback_query):
+    """Handle invite pause - same as stop but with clearer messaging."""
+    task_id = int(callback_query.data.split(":")[1])
+    
+    result = await api_client.stop_task(task_id)
+    
+    if result.get('success'):
+        task_data = await api_client.get_task(task_id)
+        text = format_invite_status(task_data)
+        
+        await callback_query.edit_message_text(
+            text,
+            reply_markup=get_invite_paused_keyboard(task_id)
+        )
+        await callback_query.answer("⏸️ Задача приостановлена. Нажмите 'Продолжить' чтобы возобновить.")
+    else:
+        await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
+
+
 async def handle_invite_resume(client: Client, callback_query):
     """Handle invite resume."""
     task_id = int(callback_query.data.split(":")[1])
@@ -2226,19 +2277,36 @@ async def handle_invite_resume(client: Client, callback_query):
 async def handle_invite_delete(client: Client, callback_query):
     """Handle invite delete."""
     task_id = int(callback_query.data.split(":")[1])
+    user_id = int(callback_query.from_user.id)
     
     result = await api_client.delete_task(task_id)
     
     if result.get('success'):
-        await callback_query.answer("Задача удалена", show_alert=True)
-        # Show tasks status again or go to main menu
-        await show_tasks_status(client, callback_query.message, page=0)
-        try:
-            await callback_query.message.delete()
-        except Exception as e:
-            logger.debug(f"Failed to delete message after task delete: {e}")
+        await callback_query.answer("Задача удалена")
+        # Show tasks status again with edit
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id)
     else:
         await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
+
+
+async def handle_invite_status(client: Client, callback_query):
+    """Show invite task details."""
+    task_id = int(callback_query.data.split(":")[1])
+    
+    task_data = await api_client.get_task(task_id)
+    if task_data.get('success'):
+        text = format_invite_status(task_data)
+        
+        status = task_data.get('status', 'pending')
+        if status == 'running':
+            kb = get_invite_running_keyboard(task_id)
+        else:
+            kb = get_invite_paused_keyboard(task_id)
+        
+        await callback_query.edit_message_text(text, reply_markup=kb)
+        await callback_query.answer()
+    else:
+        await callback_query.answer(f"Ошибка: {task_data.get('error')}", show_alert=True)
 
 
 async def handle_parse_refresh(client: Client, callback_query):
@@ -2280,6 +2348,25 @@ async def handle_parse_stop(client: Client, callback_query):
         await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
 
 
+async def handle_parse_pause(client: Client, callback_query):
+    """Handle parse pause - same as stop but with clearer messaging."""
+    task_id = int(callback_query.data.split(":")[1])
+    
+    result = await api_client.stop_parse_task(task_id)
+    
+    if result.get('success'):
+        task_data = await api_client.get_parse_task(task_id)
+        text = format_parse_status(task_data.get('task', {}))
+        
+        await callback_query.edit_message_text(
+            text,
+            reply_markup=get_parse_paused_keyboard(task_id)
+        )
+        await callback_query.answer("⏸️ Парсинг приостановлен. Нажмите 'Продолжить' чтобы возобновить.")
+    else:
+        await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
+
+
 async def handle_parse_resume(client: Client, callback_query):
     """Handle parse resume."""
     task_id = int(callback_query.data.split(":")[1])
@@ -2302,12 +2389,13 @@ async def handle_parse_resume(client: Client, callback_query):
 async def handle_parse_delete(client: Client, callback_query):
     """Handle parse delete."""
     task_id = int(callback_query.data.split(":")[1])
+    user_id = int(callback_query.from_user.id)
     
     result = await api_client.delete_parse_task(task_id)
     
     if result.get('success'):
         await callback_query.answer("Задача удалена")
-        await show_tasks_status(client, callback_query.message, edit_message=True)
+        await show_tasks_status(client, callback_query.message, edit_message=True, user_id=user_id)
     else:
         await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
 
@@ -2382,7 +2470,7 @@ async def handle_task_delete(client: Client, callback_query):
 
 
 async def handle_clear_completed_tasks(client: Client, callback_query):
-    """Handle clearing all completed and failed tasks."""
+    """Handle clearing all completed and failed tasks (both invite and parse)."""
     user_id = int(callback_query.from_user.id)
     
     # Answer callback query immediately to prevent timeout
@@ -2391,41 +2479,108 @@ async def handle_clear_completed_tasks(client: Client, callback_query):
     except Exception:
         pass  # Ignore if query already expired
     
-    # Get all tasks
-    result = await api_client.get_user_tasks(user_id)
-    tasks = result.get('tasks', [])
-    
-    # Filter completed, failed and pending tasks
-    completed_tasks = [t for t in tasks if t['status'] in ['completed', 'failed', 'pending']]
-    
-    if not completed_tasks:
-        # Already answered, just refresh the list
-        try:
-            await show_tasks_status(client, callback_query.message, page=0, edit_message=True)
-        except Exception:
-            pass
-        return
-    
-    # Delete all completed/failed/pending tasks
     deleted_count = 0
     errors = []
     
-    for task in completed_tasks:
+    # Get and clear invite tasks
+    result = await api_client.get_user_tasks(user_id)
+    invite_tasks = result.get('tasks', [])
+    
+    # Filter completed, failed and pending invite tasks
+    completed_invite_tasks = [t for t in invite_tasks if t['status'] in ['completed', 'failed', 'pending']]
+    
+    for task in completed_invite_tasks:
         result = await api_client.delete_task(task['id'])
         if result.get('success'):
             deleted_count += 1
         else:
-            errors.append(f"Задача {task['id']}: {result.get('error', 'Unknown error')}")
+            errors.append(f"Инвайт {task['id']}: {result.get('error', 'Unknown error')}")
+    
+    # Get and clear parse tasks
+    parse_result = await api_client.get_user_parse_tasks(user_id)
+    if parse_result.get('success'):
+        parse_tasks = parse_result.get('tasks', [])
+        
+        # Filter completed, failed and pending parse tasks
+        completed_parse_tasks = [t for t in parse_tasks if t.get('status') in ['completed', 'failed', 'pending']]
+        
+        for task in completed_parse_tasks:
+            result = await api_client.delete_parse_task(task['id'])
+            if result.get('success'):
+                deleted_count += 1
+            else:
+                errors.append(f"Парс {task['id']}: {result.get('error', 'Unknown error')}")
     
     # Refresh tasks list
     try:
-        await show_tasks_status(client, callback_query.message, page=0, edit_message=True)
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id)
     except Exception as e:
         logger.error(f"Error refreshing tasks list after clear: {e}")
         # Try to send notification if query is still valid
         try:
             if deleted_count > 0:
                 await callback_query.answer(f"✅ Удалено задач: {deleted_count}", show_alert=True)
+            else:
+                error_msg = "Не удалось удалить задачи"
+                if errors:
+                    error_msg += f": {', '.join(errors[:3])}"
+                await callback_query.answer(f"❌ {error_msg}", show_alert=True)
+        except Exception:
+            pass  # Query expired, ignore
+
+
+async def handle_clear_all_tasks(client: Client, callback_query):
+    """Handle clearing ALL tasks (both invite and parse, any status)."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Answer callback query immediately to prevent timeout
+    try:
+        await callback_query.answer("⏳ Удаление всех задач...")
+    except Exception:
+        pass  # Ignore if query already expired
+    
+    deleted_count = 0
+    errors = []
+    
+    # Get and clear ALL invite tasks
+    result = await api_client.get_user_tasks(user_id)
+    invite_tasks = result.get('tasks', [])
+    
+    for task in invite_tasks:
+        # First stop the task if running
+        if task['status'] == 'running':
+            await api_client.stop_task(task['id'])
+        
+        result = await api_client.delete_task(task['id'])
+        if result.get('success'):
+            deleted_count += 1
+        else:
+            errors.append(f"Инвайт {task['id']}: {result.get('error', 'Unknown error')}")
+    
+    # Get and clear ALL parse tasks
+    parse_result = await api_client.get_user_parse_tasks(user_id)
+    if parse_result.get('success'):
+        parse_tasks = parse_result.get('tasks', [])
+        
+        for task in parse_tasks:
+            # First stop the task if running
+            if task.get('status') == 'running':
+                await api_client.stop_parse_task(task['id'])
+            
+            result = await api_client.delete_parse_task(task['id'])
+            if result.get('success'):
+                deleted_count += 1
+            else:
+                errors.append(f"Парс {task['id']}: {result.get('error', 'Unknown error')}")
+    
+    # Refresh tasks list
+    try:
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id)
+    except Exception as e:
+        logger.error(f"Error refreshing tasks list after clear all: {e}")
+        try:
+            if deleted_count > 0:
+                await callback_query.answer(f"✅ Удалено всех задач: {deleted_count}", show_alert=True)
             else:
                 error_msg = "Не удалось удалить задачи"
                 if errors:

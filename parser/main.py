@@ -741,7 +741,10 @@ async def get_parse_task(task_id: int):
             "save_every_users": task.save_every_users,
             "messages_offset": task.messages_offset,
             "created_at": task.created_at,
-            "error_message": task.error_message
+            "error_message": task.error_message,
+            "delay_every": task.delay_every,
+            "last_action_time": task.last_action_time,
+            "current_session": task.current_session
         }
     }
 

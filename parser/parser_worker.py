@@ -28,6 +28,8 @@ class ParserWorker:
         # Store unsaved members for each task (for saving on stop)
         self.task_unsaved_members: Dict[int, List[Dict]] = {}
         self.task_metadata: Dict[int, Dict] = {}
+        # Track last heartbeat update time to avoid too frequent DB writes
+        self._last_heartbeat: Dict[int, float] = {}
     
     async def start_parse_task(self, task_id: int) -> Dict:
         """Start a parse task."""
@@ -48,11 +50,29 @@ class ParserWorker:
         async_task = asyncio.create_task(self._run_parse_task(task))
         self.running_tasks[task_id] = async_task
         
+        # Start heartbeat tracking (will be updated during task execution)
+        self._last_heartbeat[task_id] = 0  # Force first heartbeat update
+        
         logger.info(f"Started parse task {task_id}")
         return {"success": True}
     
+    async def _update_heartbeat_if_needed(self, task_id: int):
+        """Update heartbeat if 60+ seconds passed since last update. Returns True if updated."""
+        import time
+        now = time.time()
+        last = self._last_heartbeat.get(task_id, 0)
+        if now - last >= 60:  # Update every 60 seconds minimum
+            await self.db.update_parse_task(task_id, last_heartbeat=datetime.now().isoformat())
+            self._last_heartbeat[task_id] = now
+            return True
+        return False
+    
     async def stop_parse_task(self, task_id: int) -> Dict:
         """Stop a parse task and save any unsaved data."""
+        # Clean up heartbeat tracking
+        if task_id in self._last_heartbeat:
+            del self._last_heartbeat[task_id]
+        
         task = await self.db.get_parse_task(task_id)
         
         # Save unsaved members before stopping
@@ -508,6 +528,9 @@ class ParserWorker:
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
                 logger.info(f"🧹 Задача {task_id} удалена из списка активных задач")
+            # Clean up heartbeat tracking
+            if task_id in self._last_heartbeat:
+                del self._last_heartbeat[task_id]
             # Clean up unsaved members storage
             if task_id in self.task_unsaved_members:
                 del self.task_unsaved_members[task_id]

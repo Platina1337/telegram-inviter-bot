@@ -27,6 +27,8 @@ class InviterWorker:
         self.session_manager = session_manager
         self.running_tasks: Dict[int, asyncio.Task] = {}
         self._stop_flags: Dict[int, bool] = {}
+        # Track last heartbeat update time to avoid too frequent DB writes
+        self._last_heartbeat: Dict[int, float] = {}
     
     async def start_invite_task(self, task_id: int) -> Dict[str, Any]:
         """Start an invite task."""
@@ -62,12 +64,29 @@ class InviterWorker:
             )
             logger.info(f"Запущена задача инвайтинга по списку участников {task_id} (сессия: {task.session_alias}{proxy_str})")
         
+        # Start heartbeat tracking (will be updated during task execution)
+        self._last_heartbeat[task_id] = 0  # Force first heartbeat update
+        
         return {"success": True, "task_id": task_id, "status": "running"}
-
+    
+    async def _update_heartbeat_if_needed(self, task_id: int):
+        """Update heartbeat if 60+ seconds passed since last update. Returns True if updated."""
+        import time
+        now = time.time()
+        last = self._last_heartbeat.get(task_id, 0)
+        if now - last >= 60:  # Update every 60 seconds minimum
+            await self.db.update_invite_task(task_id, last_heartbeat=datetime.now().isoformat())
+            self._last_heartbeat[task_id] = now
+            return True
+        return False
     
     async def stop_invite_task(self, task_id: int) -> Dict[str, Any]:
         """Stop an invite task."""
         self._stop_flags[task_id] = True
+        
+        # Clean up heartbeat tracking
+        if task_id in self._last_heartbeat:
+            del self._last_heartbeat[task_id]
         
         if task_id in self.running_tasks:
             task = self.running_tasks[task_id]
@@ -81,7 +100,7 @@ class InviterWorker:
         await self.db.update_invite_task(task_id, status='paused')
         logger.info(f"Остановлена задача инвайтинга {task_id}")
         return {"success": True, "task_id": task_id, "status": "paused"}
-    
+
     async def _notify_user(self, user_id: int, message: str):
         """Send notification to user via Telegram Bot API."""
         from .config import config
@@ -513,9 +532,13 @@ class InviterWorker:
                         )
                         await self.db.update_invite_task(
                             task_id,
-                            invited_count=task.invited_count + 1
+                            invited_count=task.invited_count + 1,
+                            last_action_time=datetime.now().isoformat(),
+                            current_session=task.session_alias
                         )
                         task.invited_count += 1
+                        task.last_action_time = datetime.now().isoformat()
+                        task.current_session = task.session_alias
                         session_consecutive_invites += 1
                         invited_in_batch += 1
                         logger.info(f"Задача {task_id}: Приглашен пользователь {user_info} ({task.invited_count}/{task.limit or '∞'}) (сессия: {task.session_alias}{proxy_str})")
@@ -760,7 +783,8 @@ class InviterWorker:
                 task.target_group_id,
                 source_username=task.source_username,
                 target_username=task.target_username,
-                use_proxy=task.use_proxy
+                use_proxy=task.use_proxy,
+                invite_mode=task.invite_mode  # ВАЖНО: передаем invite_mode для правильной валидации
             )
             
             if not validation.get('success'):
@@ -1008,9 +1032,13 @@ class InviterWorker:
                         )
                         await self.db.update_invite_task(
                             task_id,
-                            invited_count=task.invited_count + 1
+                            invited_count=task.invited_count + 1,
+                            last_action_time=datetime.now().isoformat(),
+                            current_session=task.session_alias
                         )
                         task.invited_count += 1
+                        task.last_action_time = datetime.now().isoformat()
+                        task.current_session = task.session_alias
                         session_consecutive_invites += 1
                         logger.info(f"Задача {task_id}: Приглашен пользователь {user_info} ({task.invited_count}/{task.limit or '∞'}) (сессия: {task.session_alias}{proxy_str})")
                         
@@ -1348,7 +1376,10 @@ class InviterWorker:
             "updated_at": task.updated_at,
             "available_sessions": task.available_sessions,
             "filter_mode": task.filter_mode,
-            "inactive_threshold_days": task.inactive_threshold_days
+            "inactive_threshold_days": task.inactive_threshold_days,
+            "file_source": task.file_source,
+            "last_action_time": task.last_action_time,
+            "current_session": task.current_session
         }
     
     async def get_all_running_tasks(self) -> list:
@@ -1552,9 +1583,13 @@ class InviterWorker:
                         )
                         await self.db.update_invite_task(
                             task_id,
-                            invited_count=task.invited_count + 1
+                            invited_count=task.invited_count + 1,
+                            last_action_time=datetime.now().isoformat(),
+                            current_session=task.session_alias
                         )
                         task.invited_count += 1
+                        task.last_action_time = datetime.now().isoformat()
+                        task.current_session = task.session_alias
                         session_consecutive_invites += 1
                         logger.info(f"Задача {task_id}: Приглашен пользователь {user_info} ({task.invited_count}/{task.limit or '∞'}) (сессия: {task.session_alias}{proxy_str})")
                         

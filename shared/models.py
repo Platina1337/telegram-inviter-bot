@@ -68,6 +68,9 @@ class InviteTask:
     # Filter settings
     filter_mode: Literal["all", "exclude_admins", "exclude_inactive", "exclude_admins_and_inactive"] = "all"
     inactive_threshold_days: Optional[int] = None
+    # Timing and session tracking
+    last_action_time: Optional[str] = None  # ISO timestamp of last invite action
+    current_session: Optional[str] = None  # Currently active session (for rotation tracking)
 
 
 
@@ -126,4 +129,7 @@ class ParseTask:
     rotate_every_requests: int = 0  # Rotate session after every N API requests (for message_based mode)
     save_every_users: int = 0  # Save to file after every N unique users found (for message_based mode, 0 = only at end)
     messages_offset: int = 0  # Offset for message history (for message_based mode resume)
+    # Timing and session tracking
+    last_action_time: Optional[str] = None  # ISO timestamp of last parse action
+    current_session: Optional[str] = None  # Currently active session (for rotation tracking)
 
