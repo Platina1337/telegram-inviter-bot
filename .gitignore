@@ -60,3 +60,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# User-uploaded files (folder stays in repo, contents ignored)
+user_files/*
+!user_files/.gitkeep

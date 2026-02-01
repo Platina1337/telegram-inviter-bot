@@ -1342,6 +1342,7 @@ class InviterWorker:
             "delay_every": task.delay_every,
             "rotate_sessions": task.rotate_sessions,
             "rotate_every": task.rotate_every,
+            "use_proxy": task.use_proxy,
             "error_message": task.error_message,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
