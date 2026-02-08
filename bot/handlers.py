@@ -4,9 +4,12 @@ Main main handlers for the inviter bot.
 """
 import logging
 from typing import Dict
-from pyrogram import Client
-from pyrogram.types import Message, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import MessageNotModified
+from pyrogram import Client, filters
+from pyrogram.types import (
+    Message, ReplyKeyboardRemove, CallbackQuery, InlineKeyboardMarkup, 
+    InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+)
+from pyrogram.errors import FloodWait, RPCError, MessageNotModified
 
 from bot.api_client import api_client
 from bot.states import (
@@ -22,6 +25,13 @@ from bot.states import (
     FSM_PARSE_MSG_LIMIT, FSM_PARSE_MSG_DELAY_EVERY, FSM_PARSE_MSG_ROTATE_EVERY, FSM_PARSE_MSG_SAVE_EVERY,
     FSM_FILE_MANAGER, FSM_FILE_MANAGER_ACTION, FSM_FILE_MANAGER_COPY_NAME, 
     FSM_FILE_MANAGER_RENAME, FSM_FILE_MANAGER_FILTER_KEYWORD,
+    # Post Forwarding states
+    FSM_POST_FORWARD_SOURCE_TYPE, FSM_POST_FORWARD_SOURCE, FSM_POST_FORWARD_TARGET_TYPE,
+    FSM_POST_FORWARD_TARGET, FSM_POST_FORWARD_SESSION_SELECT, FSM_POST_FORWARD_MODE_SELECT,
+    FSM_POST_FORWARD_SETTINGS, FSM_POST_FORWARD_SETTINGS_LIMIT, FSM_POST_FORWARD_SETTINGS_DELAY,
+    FSM_POST_FORWARD_SETTINGS_DELAY_EVERY, FSM_POST_FORWARD_SETTINGS_ROTATE_EVERY,
+    FSM_POST_FORWARD_SETTINGS_NATIVE,
+    FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST, FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST,
     get_main_keyboard, get_group_history_keyboard, get_target_group_history_keyboard,
     get_parse_source_group_history_keyboard,
     get_invite_menu_keyboard, get_settings_keyboard, get_session_select_keyboard,
@@ -31,7 +41,16 @@ from bot.states import (
     get_file_manager_list_keyboard, get_file_actions_keyboard, get_file_filter_keyboard, format_file_stats,
     get_filename_by_index,
     parse_group_button, normalize_group_input, format_group_button,
-    format_invite_status, format_parse_status
+    format_invite_status, format_parse_status,
+    # Post Forwarding keyboards and formatters
+    get_post_forward_main_keyboard, get_post_forward_source_type_keyboard,
+    get_post_forward_target_type_keyboard, get_post_forward_mode_keyboard,
+    get_post_forward_settings_keyboard,
+    get_post_forward_settings_message_text,
+    get_post_forward_session_keyboard,
+    get_post_parse_running_keyboard, get_post_parse_paused_keyboard,
+    get_post_monitor_running_keyboard, get_post_monitor_paused_keyboard,
+    format_post_parse_status, format_post_monitor_status, format_session_error_message
 )
 
 from bot.session_handlers import sessions_command
@@ -116,6 +135,9 @@ async def text_handler(client: Client, message: Message):
             return
         elif text == "🔍 Парсинг в файл":
             await start_parse_to_file_flow(client, message)
+            return
+        elif text == "📨 Пересылка постов":
+            await start_post_forward_flow(client, message)
             return
         elif text == "📁 Менеджер файлов":
             await start_file_manager(client, message)
@@ -590,6 +612,17 @@ async def text_handler(client: Client, message: Message):
         await handle_file_manager_filter_keyword(client, message, text)
         return
     
+    # ============== Post Forwarding States ==============
+    if state in [FSM_POST_FORWARD_SOURCE, FSM_POST_FORWARD_TARGET,
+                 FSM_POST_FORWARD_SETTINGS_LIMIT, FSM_POST_FORWARD_SETTINGS_DELAY,
+                 FSM_POST_FORWARD_SETTINGS_DELAY_EVERY, FSM_POST_FORWARD_SETTINGS_ROTATE_EVERY,
+                 FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST, FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST]:
+        if text == "🔙 Назад":
+            await show_main_menu(client, message)
+            return
+        await handle_post_forward_text_input(client, message, text)
+        return
+    
     # Default - show main menu
     await show_main_menu(client, message)
 
@@ -881,8 +914,18 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
     parse_tasks = parse_result.get('tasks', [])
     for t in parse_tasks: t['type'] = 'parse'
     
-    # Merge tasks and sort by created_at (most recent first)
-    tasks = invite_tasks + parse_tasks
+    # Get post parse tasks
+    post_parse_result = await api_client.get_user_post_parse_tasks(user_id)
+    post_parse_tasks = post_parse_result.get('tasks', []) if post_parse_result.get('success') else []
+    for t in post_parse_tasks: t['type'] = 'post_parse'
+    
+    # Get post monitoring tasks
+    post_monitor_result = await api_client.get_user_post_monitoring_tasks(user_id)
+    post_monitor_tasks = post_monitor_result.get('tasks', []) if post_monitor_result.get('success') else []
+    for t in post_monitor_tasks: t['type'] = 'post_monitor'
+    
+    # Merge all tasks and sort by created_at (most recent first)
+    tasks = invite_tasks + parse_tasks + post_parse_tasks + post_monitor_tasks
     tasks.sort(key=lambda x: x.get('created_at', ''), reverse=True)
     
     if not tasks:
@@ -931,15 +974,35 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
     for idx, task in enumerate(page_tasks, start=start_idx + 1):
         icon = status_icons.get(task['status'], '❓')
         status_text = status_names.get(task['status'], task['status'])
-        is_parse = task.get('type') == 'parse'
+        task_type = task.get('type')
         
-        if is_parse:
+        if task_type == 'parse':
+            # Parse to file task
             parsed = task.get('parsed_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
             task_name = f"🔍 {task.get('source_group', 'N/A')[:30]} → 📁 {task.get('file_name', 'N/A')}"
             progress_text = f"   Спаршено: {parsed}{limit_text}"
+        elif task_type == 'post_parse':
+            # Post parsing task
+            forwarded = task.get('forwarded_count', 0)
+            limit = task.get('limit')
+            limit_text = f"/{limit}" if limit else ""
+            source = task.get('source_title', 'N/A')[:25]
+            target = task.get('target_title', 'N/A')[:25]
+            task_name = f"📥 {source} → {target}"
+            progress_text = f"   Переслано: {forwarded}{limit_text}"
+        elif task_type == 'post_monitor':
+            # Post monitoring task
+            forwarded = task.get('forwarded_count', 0)
+            limit = task.get('limit')
+            limit_text = f"/{limit}" if limit else ""
+            source = task.get('source_title', 'N/A')[:25]
+            target = task.get('target_title', 'N/A')[:25]
+            task_name = f"🔄 {source} → {target}"
+            progress_text = f"   Переслано: {forwarded}{limit_text}"
         else:
+            # Invite task
             invited = task.get('invited_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
@@ -958,26 +1021,48 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
         
         # Add action buttons for each task with numbers
         task_buttons = []
-        prefix = "parse" if is_parse else "invite"
+        
+        # Determine prefix based on task type
+        if task_type == 'post_parse':
+            prefix = "pp"
+        elif task_type == 'post_monitor':
+            prefix = "pm"
+        elif task_type == 'parse':
+            prefix = "parse"
+        else:
+            prefix = "invite"
         
         if task['status'] == 'running':
-            task_buttons.append(InlineKeyboardButton(
-                f"{idx}. ⏹️ Стоп",
-                callback_data=f"{prefix}_stop:{task['id']}"
-            ))
+            if task_type in ['post_parse', 'post_monitor']:
+                task_buttons.append(InlineKeyboardButton(
+                    f"{idx}. ⏸️ Пауза",
+                    callback_data=f"{prefix}_pause:{task['id']}"
+                ))
+            else:
+                task_buttons.append(InlineKeyboardButton(
+                    f"{idx}. ⏹️ Стоп",
+                    callback_data=f"{prefix}_stop:{task['id']}"
+                ))
         elif task['status'] == 'paused':
             task_buttons.append(InlineKeyboardButton(
                 f"{idx}. ▶️ Продолжить",
                 callback_data=f"{prefix}_resume:{task['id']}"
             ))
         
-        # Add detail button
-        task_buttons.append(InlineKeyboardButton(
-            f"{idx}. 🔍 Детали",
-            callback_data=f"{prefix}_status:{task['id']}"
-        ))
+        # Add detail button for non-post tasks
+        if task_type not in ['post_parse', 'post_monitor']:
+            task_buttons.append(InlineKeyboardButton(
+                f"{idx}. 🔍 Детали",
+                callback_data=f"{prefix}_status:{task['id']}"
+            ))
+        else:
+            # For post tasks, refresh shows details
+            task_buttons.append(InlineKeyboardButton(
+                f"{idx}. 🔍 Детали",
+                callback_data=f"{prefix}_refresh:{task['id']}"
+            ))
         
-        # Add delete button for all tasks (not just completed/failed/pending)
+        # Add delete button for all tasks
         task_buttons.append(InlineKeyboardButton(
             f"{idx}. 🗑️",
             callback_data=f"{prefix}_delete:{task['id']}"
@@ -1044,6 +1129,23 @@ async def callback_handler(client: Client, callback_query):
     # Initialize user state if needed
     if user_id not in user_states:
         user_states[user_id] = {}
+    
+    # ============== Post Forwarding Callbacks ==============
+    post_forward_prefixes = [
+        "post_parse_start", "post_monitor_start", "post_forward_tasks", "post_forward_back",
+        "pf_source_type:", "pf_target_type:", "pf_back", "pf_mode:",
+        "pf_settings_", "pf_start_task",
+        "pf_open_native_settings", "pf_native_toggle", "pf_native_check", "pf_native_source", "pf_native_back",
+        # Session selection
+        "pf_toggle_session:", "pf_sessions_done", "pf_sessions_back", "pf_sessions_info", "pf_no_sessions",
+        # Task actions
+        "pp_pause:", "pp_resume:", "pp_delete:", "pp_refresh:", "pp_settings:",
+        "pm_pause:", "pm_resume:", "pm_delete:", "pm_refresh:", "pm_settings:"
+    ]
+    if any(data.startswith(prefix) for prefix in post_forward_prefixes):
+        handled = await handle_post_forward_callback(client, callback_query)
+        if handled:
+            return
     
     # ============== Invite Menu ==============
     
@@ -1504,6 +1606,189 @@ async def callback_handler(client: Client, callback_query):
     if data.startswith("parse_delete:"):
         await handle_parse_delete(client, callback_query)
         return
+    
+    # ============== Settings Editing from Status ==============
+    
+    if data.startswith("invite_settings_from_status:"):
+        task_id = int(data.split(":")[1])
+        
+        # Load current task settings
+        task_result = await api_client.get_task(task_id)
+        if not task_result.get('success'):
+            await callback_query.answer("❌ Не удалось загрузить задачу", show_alert=True)
+            return
+        
+        task_data = task_result.get('task', {})
+        
+        # Store task_id and current settings in user state
+        user_states[user_id]['editing_task_id'] = task_id
+        user_states[user_id]['editing_task_type'] = 'invite'
+        user_states[user_id]['invite_settings'] = {
+            'delay_seconds': task_data.get('delay_seconds', 30),
+            'delay_every': task_data.get('delay_every', 1),
+            'limit': task_data.get('limit'),
+            'rotate_sessions': task_data.get('rotate_sessions', False),
+            'rotate_every': task_data.get('rotate_every', 0),
+            'use_proxy': task_data.get('use_proxy', True),
+            'available_sessions': task_data.get('available_sessions', []),
+            'filter_mode': task_data.get('filter_mode', 'all'),
+            'inactive_threshold_days': task_data.get('inactive_threshold_days')
+        }
+        user_states[user_id]['state'] = FSM_INVITE_SETTINGS
+        
+        # Show settings keyboard
+        await callback_query.edit_message_text(
+            "⚙️ **Редактирование настроек задачи**\n\n"
+            "Измените нужные параметры, затем нажмите 'Сохранить':",
+            reply_markup=get_settings_keyboard(user_states[user_id]['invite_settings'], edit_mode=True)
+        )
+        await callback_query.answer()
+        return
+    
+    if data.startswith("parse_settings_from_status:"):
+        task_id = int(data.split(":")[1])
+        
+        # Load current task settings
+        task_result = await api_client.get_parse_task(task_id)
+        if not task_result.get('success'):
+            await callback_query.answer("❌ Не удалось загрузить задачу", show_alert=True)
+            return
+        
+        task_data = task_result.get('task', {})
+        
+        # Store task_id and current settings in user state
+        user_states[user_id]['editing_task_id'] = task_id
+        user_states[user_id]['editing_task_type'] = 'parse'
+        user_states[user_id]['parse_settings'] = {
+            'delay_seconds': task_data.get('delay_seconds', 2),
+            'limit': task_data.get('limit'),
+            'save_every': task_data.get('save_every', 0),
+            'rotate_sessions': task_data.get('rotate_sessions', False),
+            'rotate_every': task_data.get('rotate_every', 0),
+            'use_proxy': task_data.get('use_proxy', True),
+            'available_sessions': task_data.get('available_sessions', []),
+            'filter_admins': task_data.get('filter_admins', False),
+            'filter_inactive': task_data.get('filter_inactive', False),
+            'inactive_days': task_data.get('inactive_threshold_days', 30),
+            'parse_mode': task_data.get('parse_mode', 'member_list'),
+            'keyword_filter': task_data.get('keyword_filter', []),
+            'exclude_keywords': task_data.get('exclude_keywords', []),
+            'source_type': task_data.get('source_type', 'group')
+        }
+        user_states[user_id]['state'] = FSM_PARSE_SETTINGS
+        
+        # Show settings keyboard
+        await callback_query.edit_message_text(
+            "⚙️ **Редактирование настроек задачи**\n\n"
+            "Измените нужные параметры, затем нажмите 'Сохранить':",
+            reply_markup=get_parse_settings_keyboard(user_states[user_id]['parse_settings'], edit_mode=True)
+        )
+        await callback_query.answer()
+        return
+
+    # ============== Save/Cancel Settings Editing ==============
+    
+    if data == "invite_settings_save":
+        task_id = user_states.get(user_id, {}).get('editing_task_id')
+        if not task_id:
+            await callback_query.answer("❌ Ошибка: задача не найдена", show_alert=True)
+            return
+        
+        settings = user_states[user_id].get('invite_settings', {})
+        
+        # Save settings via API
+        result = await api_client.update_task(
+            task_id,
+            delay_seconds=settings.get('delay_seconds'),
+            delay_every=settings.get('delay_every'),
+            limit=settings.get('limit'),
+            rotate_sessions=settings.get('rotate_sessions'),
+            rotate_every=settings.get('rotate_every'),
+            use_proxy=settings.get('use_proxy'),
+            available_sessions=settings.get('available_sessions')
+        )
+        
+        if not result.get('success'):
+            await callback_query.answer("❌ Не удалось сохранить настройки", show_alert=True)
+            return
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await callback_query.answer("✅ Настройки сохранены")
+        await handle_invite_status(client, callback_query)
+        return
+    
+    if data == "invite_settings_cancel":
+        task_id = user_states.get(user_id, {}).get('editing_task_id')
+        if not task_id:
+            await callback_query.answer("❌ Ошибка: задача не найдена", show_alert=True)
+            return
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await callback_query.answer("Отменено")
+        await handle_invite_status(client, callback_query)
+        return
+    
+    if data == "parse_settings_save":
+        task_id = user_states.get(user_id, {}).get('editing_task_id')
+        if not task_id:
+            await callback_query.answer("❌ Ошибка: задача не найдена", show_alert=True)
+            return
+        
+        settings = user_states[user_id].get('parse_settings', {})
+        
+        # Save settings via API
+        result = await api_client.update_parse_task(
+            task_id,
+            delay_seconds=settings.get('delay_seconds'),
+            limit=settings.get('limit'),
+            save_every=settings.get('save_every'),
+            rotate_sessions=settings.get('rotate_sessions'),
+            rotate_every=settings.get('rotate_every'),
+            use_proxy=settings.get('use_proxy'),
+            available_sessions=settings.get('available_sessions'),
+            filter_admins=settings.get('filter_admins'),
+            filter_inactive=settings.get('filter_inactive'),
+            inactive_threshold_days=settings.get('inactive_threshold_days'),
+            keyword_filter=settings.get('keyword_filter'),
+            exclude_keywords=settings.get('exclude_keywords')
+        )
+        
+        if not result.get('success'):
+            await callback_query.answer("❌ Не удалось сохранить настройки", show_alert=True)
+            return
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await callback_query.answer("✅ Настройки сохранены")
+        await handle_parse_status(client, callback_query)
+        return
+    
+    if data == "parse_settings_cancel":
+        task_id = user_states.get(user_id, {}).get('editing_task_id')
+        if not task_id:
+            await callback_query.answer("❌ Ошибка: задача не найдена", show_alert=True)
+            return
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await callback_query.answer("Отменено")
+        await handle_parse_status(client, callback_query)
+        return
+
     
     # ============== Parsing to File Callbacks ==============
     
@@ -2511,6 +2796,36 @@ async def handle_clear_completed_tasks(client: Client, callback_query):
             else:
                 errors.append(f"Парс {task['id']}: {result.get('error', 'Unknown error')}")
     
+    # Get and clear post parse tasks
+    post_parse_result = await api_client.get_user_post_parse_tasks(user_id)
+    if post_parse_result.get('success'):
+        post_parse_tasks = post_parse_result.get('tasks', [])
+        
+        # Filter completed, failed and pending post parse tasks
+        completed_post_parse_tasks = [t for t in post_parse_tasks if t.get('status') in ['completed', 'failed', 'pending']]
+        
+        for task in completed_post_parse_tasks:
+            result = await api_client.delete_post_parse_task(task['id'])
+            if result.get('success'):
+                deleted_count += 1
+            else:
+                errors.append(f"Парс постов {task['id']}: {result.get('error', 'Unknown error')}")
+    
+    # Get and clear post monitoring tasks
+    post_monitor_result = await api_client.get_user_post_monitoring_tasks(user_id)
+    if post_monitor_result.get('success'):
+        post_monitor_tasks = post_monitor_result.get('tasks', [])
+        
+        # Filter completed, failed and pending post monitoring tasks
+        completed_post_monitor_tasks = [t for t in post_monitor_tasks if t.get('status') in ['completed', 'failed', 'pending']]
+        
+        for task in completed_post_monitor_tasks:
+            result = await api_client.delete_post_monitoring_task(task['id'])
+            if result.get('success'):
+                deleted_count += 1
+            else:
+                errors.append(f"Мониторинг {task['id']}: {result.get('error', 'Unknown error')}")
+    
     # Refresh tasks list
     try:
         await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id)
@@ -2572,6 +2887,38 @@ async def handle_clear_all_tasks(client: Client, callback_query):
                 deleted_count += 1
             else:
                 errors.append(f"Парс {task['id']}: {result.get('error', 'Unknown error')}")
+    
+    # Get and clear ALL post parse tasks
+    post_parse_result = await api_client.get_user_post_parse_tasks(user_id)
+    if post_parse_result.get('success'):
+        post_parse_tasks = post_parse_result.get('tasks', [])
+        
+        for task in post_parse_tasks:
+            # First stop the task if running
+            if task.get('status') == 'running':
+                await api_client.stop_post_parse_task(task['id'])
+            
+            result = await api_client.delete_post_parse_task(task['id'])
+            if result.get('success'):
+                deleted_count += 1
+            else:
+                errors.append(f"Парс постов {task['id']}: {result.get('error', 'Unknown error')}")
+    
+    # Get and clear ALL post monitoring tasks
+    post_monitor_result = await api_client.get_user_post_monitoring_tasks(user_id)
+    if post_monitor_result.get('success'):
+        post_monitor_tasks = post_monitor_result.get('tasks', [])
+        
+        for task in post_monitor_tasks:
+            # First stop the task if running
+            if task.get('status') == 'running':
+                await api_client.stop_post_monitoring_task(task['id'])
+            
+            result = await api_client.delete_post_monitoring_task(task['id'])
+            if result.get('success'):
+                deleted_count += 1
+            else:
+                errors.append(f"Мониторинг {task['id']}: {result.get('error', 'Unknown error')}")
     
     # Refresh tasks list
     try:
@@ -3442,3 +3789,1403 @@ async def handle_file_manager_filter_keyword(client: Client, message: Message, t
         )
     
     await start_file_manager(client, message)
+
+
+# ============== Post Forwarding Handlers ==============
+
+async def start_post_forward_flow(client: Client, message: Message):
+    """Start the post forwarding flow - show main menu for post parsing/monitoring."""
+    user_id = message.from_user.id
+    
+    # Check for sessions first
+    result = await api_client.list_sessions()
+    sessions = result.get('sessions', [])
+    
+    if not sessions:
+        await message.reply(
+            "⚠️ **Нет активных сессий!**\n\n"
+            "Для пересылки постов необходимо добавить хотя бы одну сессию.\n"
+            "Перейдите в меню 🔐 **Сессии** -> **Добавить сессию**.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    user_states[user_id] = {
+        'state': FSM_POST_FORWARD_MODE_SELECT,
+        'post_forward_settings': {
+            'delay_seconds': 2,
+            'delay_every': 1,
+            'limit': None,
+            'rotate_sessions': False,
+            'rotate_every': 0,
+            'use_proxy': True,
+            'filter_contacts': False,
+            'remove_contacts': False,
+            'skip_on_contacts': False,
+            'parse_direction': 'backward',
+            'media_filter': 'all',
+            'selected_sessions': []
+        }
+    }
+    
+    await message.reply(
+        "📨 **Пересылка постов**\n\n"
+        "Выберите режим работы:\n\n"
+        "📥 **Парсинг постов** - парсинг исторических постов из канала/группы\n"
+        "🔄 **Мониторинг постов** - пересылка в реал-тайме новых постов",
+        reply_markup=get_post_forward_main_keyboard()
+    )
+
+
+async def handle_post_forward_callback(client: Client, callback_query):
+    """Handle callbacks for post forwarding flow."""
+    user_id = callback_query.from_user.id
+    data = callback_query.data
+    
+    if user_id not in user_states:
+        user_states[user_id] = {}
+    
+    # Handle main menu buttons
+    if data == "post_parse_start":
+        user_states[user_id]['post_forward_mode'] = 'parse'
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SESSION_SELECT
+        user_states[user_id]['post_forward_settings'] = user_states[user_id].get('post_forward_settings', {})
+        
+        # Get assigned sessions for post_parsing task
+        sessions_result = await api_client.list_sessions()
+        assignments = sessions_result.get('assignments', {})
+        assigned_sessions = assignments.get('post_parsing', [])
+        
+        # Pre-select assigned sessions
+        user_states[user_id]['post_forward_settings']['selected_sessions'] = assigned_sessions.copy() if assigned_sessions else []
+        
+        preselect_info = ""
+        if assigned_sessions:
+            preselect_info = f"\n✅ Предвыбрано из назначений: {len(assigned_sessions)} сессий\n"
+        
+        keyboard = await get_post_forward_session_keyboard(assigned_sessions, sessions_result.get('sessions', []))
+        await callback_query.message.edit_text(
+            "📥 **Парсинг постов**\n\n"
+            "🔐 **Шаг 1: Выберите сессии**\n"
+            f"{preselect_info}\n"
+            "Выберите одну или несколько сессий для выполнения задачи.\n"
+            "Сессии будут использоваться для доступа к каналам/группам.\n\n"
+            "🟢 - активная сессия\n"
+            "🔴 - неактивная сессия\n"
+            "🟡 - статус неизвестен",
+            reply_markup=keyboard
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "post_monitor_start":
+        user_states[user_id]['post_forward_mode'] = 'monitor'
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SESSION_SELECT
+        user_states[user_id]['post_forward_settings'] = user_states[user_id].get('post_forward_settings', {})
+        
+        # Get assigned sessions for post_monitoring task
+        sessions_result = await api_client.list_sessions()
+        assignments = sessions_result.get('assignments', {})
+        assigned_sessions = assignments.get('post_monitoring', [])
+        
+        # Pre-select assigned sessions
+        user_states[user_id]['post_forward_settings']['selected_sessions'] = assigned_sessions.copy() if assigned_sessions else []
+        
+        preselect_info = ""
+        if assigned_sessions:
+            preselect_info = f"\n✅ Предвыбрано из назначений: {len(assigned_sessions)} сессий\n"
+        
+        keyboard = await get_post_forward_session_keyboard(assigned_sessions, sessions_result.get('sessions', []))
+        await callback_query.message.edit_text(
+            "🔄 **Мониторинг постов**\n\n"
+            "🔐 **Шаг 1: Выберите сессии**\n"
+            f"{preselect_info}\n"
+            "Выберите одну или несколько сессий для выполнения задачи.\n"
+            "Сессии будут использоваться для доступа к каналам/группам.\n\n"
+            "🟢 - активная сессия\n"
+            "🔴 - неактивная сессия\n"
+            "🟡 - статус неизвестен",
+            reply_markup=keyboard
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "post_forward_tasks":
+        await show_post_forward_tasks(client, callback_query)
+        return True
+    
+    if data == "post_forward_back":
+        await callback_query.message.delete()
+        await show_main_menu(client, callback_query.message, "🏠 **Главное меню**\n\nВыберите действие:")
+        await safe_answer_callback(callback_query)
+        return True
+    
+    # ============== Session Selection for Post Forwarding ==============
+    
+    if data.startswith("pf_toggle_session:"):
+        session_alias = data.split(":")[1]
+        settings = user_states[user_id].get('post_forward_settings', {})
+        selected = settings.get('selected_sessions', [])
+        
+        if session_alias in selected:
+            selected.remove(session_alias)
+        else:
+            selected.append(session_alias)
+        
+        settings['selected_sessions'] = selected
+        user_states[user_id]['post_forward_settings'] = settings
+        
+        keyboard = await get_post_forward_session_keyboard(selected)
+        await callback_query.message.edit_reply_markup(reply_markup=keyboard)
+        await safe_answer_callback(callback_query, f"Сессия {'выбрана' if session_alias in selected else 'отменена'}")
+        return True
+    
+    if data == "pf_sessions_info":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        selected = settings.get('selected_sessions', [])
+        if not selected:
+            await safe_answer_callback(callback_query, "Выберите хотя бы одну сессию для продолжения", show_alert=True)
+        else:
+            await safe_answer_callback(callback_query, f"Выбрано сессий: {len(selected)}")
+        return True
+    
+    if data == "pf_no_sessions":
+        await safe_answer_callback(callback_query, "Добавьте сессии в меню 🔐 Сессии", show_alert=True)
+        return True
+    
+    if data == "pf_sessions_done":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        selected = settings.get('selected_sessions', [])
+        
+        if not selected:
+            await safe_answer_callback(callback_query, "⚠️ Выберите хотя бы одну сессию!", show_alert=True)
+            return True
+        
+        # Move to source type selection
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+        mode_icon = "📥" if mode == 'parse' else "🔄"
+        
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SOURCE_TYPE
+        await callback_query.message.edit_text(
+            f"{mode_icon} **{mode_name}**\n\n"
+            f"✅ Выбрано сессий: {len(selected)}\n\n"
+            "📤 **Шаг 2: Выберите тип источника**",
+            reply_markup=get_post_forward_source_type_keyboard()
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "pf_sessions_back":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_MODE_SELECT
+        await callback_query.message.edit_text(
+            "📨 **Пересылка постов**\n\n"
+            "Выберите режим работы:\n\n"
+            "📥 **Парсинг постов** - парсинг исторических постов из канала/группы\n"
+            "🔄 **Мониторинг постов** - пересылка в реал-тайме новых постов",
+            reply_markup=get_post_forward_main_keyboard()
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    # Handle source type selection
+    if data.startswith("pf_source_type:"):
+        source_type = data.split(":")[1]
+        user_states[user_id]['pf_source_type'] = source_type
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SOURCE
+        
+        type_name = "канала" if source_type == "channel" else "группы"
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+        mode_icon = "📥" if mode == 'parse' else "🔄"
+        
+        kb = await get_parse_source_group_history_keyboard(user_id)
+        await callback_query.message.reply(
+            f"{mode_icon} **{mode_name}**\n\n"
+            f"📤 **Шаг 3: Введите ссылку или ID {type_name}-источника:**\n\n"
+            "Выберите из списка или введите вручную:\n"
+            "• @channel_username\n"
+            "• https://t.me/channel_username\n"
+            "• -1001234567890",
+            reply_markup=kb or ReplyKeyboardRemove()
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    # Handle target type selection
+    if data.startswith("pf_target_type:"):
+        target_type = data.split(":")[1]
+        user_states[user_id]['pf_target_type'] = target_type
+        user_states[user_id]['state'] = FSM_POST_FORWARD_TARGET
+        
+        type_name = "канала" if target_type == "channel" else "группы"
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+        mode_icon = "📥" if mode == 'parse' else "🔄"
+        
+        kb = await get_target_group_history_keyboard(user_id)
+        await callback_query.message.reply(
+            f"{mode_icon} **{mode_name}**\n\n"
+            f"📥 **Шаг 5: Введите ссылку или ID {type_name}-цели:**\n\n"
+            "Выберите из списка или введите вручную:\n"
+            "• @channel_username\n"
+            "• https://t.me/channel_username\n"
+            "• -1001234567890",
+            reply_markup=kb or ReplyKeyboardRemove()
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    # Handle back
+    if data == "pf_back":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_MODE_SELECT
+        await callback_query.message.edit_text(
+            "📨 **Пересылка постов**\n\n"
+            "Выберите режим работы:",
+            reply_markup=get_post_forward_main_keyboard()
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    # Handle settings toggles
+    if data == "pf_settings_rotate":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        settings['rotate_sessions'] = not settings.get('rotate_sessions', False)
+        user_states[user_id]['post_forward_settings'] = settings
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        source = user_states[user_id].get('pf_source', {})
+        target = user_states[user_id].get('pf_target', {})
+        sc = len(settings.get('selected_sessions', [])) or None
+        await callback_query.message.edit_text(
+            get_post_forward_settings_message_text(mode, source, target, settings, sc),
+            reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        )
+        await safe_answer_callback(callback_query, "Ротация сессий изменена")
+        return True
+    
+    if data == "pf_settings_proxy":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        settings['use_proxy'] = not settings.get('use_proxy', True)
+        user_states[user_id]['post_forward_settings'] = settings
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        source = user_states[user_id].get('pf_source', {})
+        target = user_states[user_id].get('pf_target', {})
+        sc = len(settings.get('selected_sessions', [])) or None
+        await callback_query.message.edit_text(
+            get_post_forward_settings_message_text(mode, source, target, settings, sc),
+            reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        )
+        await safe_answer_callback(callback_query, "Настройка прокси изменена")
+        return True
+    
+    if data == "pf_settings_contact_action":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        
+        # Determine current mode
+        skip_on_contacts = settings.get('skip_on_contacts', False)
+        remove_contacts = settings.get('remove_contacts', False)
+        
+        if settings.get('use_native_forward', False):
+            # Native Mode: Toggle between Ignore and Skip
+            if skip_on_contacts:
+                # Skip -> Ignore
+                settings['skip_on_contacts'] = False
+                mode_text = "Игнорировать"
+            else:
+                # Ignore -> Skip
+                settings['skip_on_contacts'] = True
+                mode_text = "Пропускать"
+            
+            # Ensure edit related flags are OFF
+            settings['remove_contacts'] = False
+            settings['filter_contacts'] = False
+            
+        else:
+            # Normal Mode: Cycle ignore -> edit -> skip -> ignore
+            if skip_on_contacts:
+                # skip -> ignore
+                settings['skip_on_contacts'] = False
+                settings['remove_contacts'] = False
+                settings['filter_contacts'] = False
+                mode_text = "Игнорировать"
+            elif remove_contacts:
+                # edit -> skip
+                settings['skip_on_contacts'] = True
+                settings['remove_contacts'] = False
+                settings['filter_contacts'] = False
+                mode_text = "Пропускать"
+            else:
+                # ignore -> edit
+                settings['skip_on_contacts'] = False
+                settings['remove_contacts'] = True
+                settings['filter_contacts'] = False
+                mode_text = "Редактировать"
+        
+        user_states[user_id]['post_forward_settings'] = settings
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        source = user_states[user_id].get('pf_source', {})
+        target = user_states[user_id].get('pf_target', {})
+        sc = len(settings.get('selected_sessions', [])) or None
+        await callback_query.message.edit_text(
+            get_post_forward_settings_message_text(mode, source, target, settings, sc),
+            reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        )
+        await safe_answer_callback(callback_query, f"При контактах: {mode_text}")
+        return True
+    
+    if data == "pf_settings_direction":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        current = settings.get('parse_direction', 'backward')
+        settings['parse_direction'] = 'forward' if current == 'backward' else 'backward'
+        user_states[user_id]['post_forward_settings'] = settings
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        source = user_states[user_id].get('pf_source', {})
+        target = user_states[user_id].get('pf_target', {})
+        sc = len(settings.get('selected_sessions', [])) or None
+        await callback_query.message.edit_text(
+            get_post_forward_settings_message_text(mode, source, target, settings, sc),
+            reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        )
+        await safe_answer_callback(callback_query, "Направление парсинга изменено")
+        return True
+    
+    if data == "pf_settings_media_filter":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        
+        if settings.get('use_native_forward', False):
+            await safe_answer_callback(callback_query, "⚠️ Недоступно при нативной пересылке", show_alert=True)
+            return True
+            
+        current = settings.get('media_filter', 'all')
+        filters = ['all', 'media_only', 'text_only']
+        idx = (filters.index(current) + 1) % len(filters)
+        settings['media_filter'] = filters[idx]
+        settings['use_native_forward'] = False  # mutually exclusive with media filter
+        user_states[user_id]['post_forward_settings'] = settings
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        source = user_states[user_id].get('pf_source', {})
+        target = user_states[user_id].get('pf_target', {})
+        sc = len(settings.get('selected_sessions', [])) or None
+        await callback_query.message.edit_text(
+            get_post_forward_settings_message_text(mode, source, target, settings, sc),
+            reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        )
+        await safe_answer_callback(callback_query, "Фильтр медиа изменен")
+        return True
+    
+    if data == "pf_settings_whitelist":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST
+        await callback_query.message.edit_text(
+            "✅ **Включая слова (Whitelist)**\n\n"
+            "Введите слова через запятую, которые **должны** присутствовать в посте.\n"
+            "Если пост не содержит ни одного из этих слов, он будет пропущен.\n\n"
+            "Пример: `скидка, акция, распродажа`\n"
+            "Отправьте `нет` или `-` чтобы очистить список."
+        )
+        await safe_answer_callback(callback_query)
+        return True
+
+    if data == "pf_settings_blacklist":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST
+        await callback_query.message.edit_text(
+            "🚫 **Исключая слова (Blacklist)**\n\n"
+            "Введите слова через запятую, которых **не должно** быть в посте.\n"
+            "Если пост содержит хотя бы одно из этих слов, он будет пропущен.\n\n"
+            "Пример: `реклама, казино, ставки`\n"
+            "Отправьте `нет` или `-` чтобы очистить список."
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "pf_settings_limit":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_LIMIT
+        await callback_query.message.edit_text(
+            "🔢 **Лимит постов**\n\n"
+            "Введите максимальное количество постов для пересылки\n"
+            "(или 0 для снятия лимита):"
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "pf_settings_delay":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_DELAY
+        await callback_query.message.edit_text(
+            "⏱️ **Задержка**\n\n"
+            "Введите задержку между пересылками (в секундах):"
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "pf_settings_delay_every":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_DELAY_EVERY
+        await callback_query.message.edit_text(
+            "🔢 **Задержка каждые N постов**\n\n"
+            "Введите через сколько постов применять задержку:"
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "pf_settings_rotate_every":
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_ROTATE_EVERY
+        await callback_query.message.edit_text(
+            "🔄 **Ротация каждые N постов**\n\n"
+            "Введите через сколько постов менять сессию\n"
+            "(0 = только при ошибках):"
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "pf_native_toggle":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        current = settings.get('use_native_forward', False)
+        settings['use_native_forward'] = not current
+        
+        if not current: # Enabling Native
+            # Preserve Skip if enabled, otherwise default to Ignore
+            # But Force Edit (remove_contacts) to False -> Ignore
+            if settings.get('remove_contacts', False):
+                 settings['skip_on_contacts'] = False # Edit -> Ignore
+            
+            settings['filter_contacts'] = False
+            settings['remove_contacts'] = False
+            # settings['skip_on_contacts'] remains as is (True or False)
+            
+            settings['media_filter'] = 'all'
+            settings['forward_show_source'] = True # Force Source ON
+            
+        user_states[user_id]['post_forward_settings'] = settings
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        source = user_states[user_id].get('pf_source', {})
+        target = user_states[user_id].get('pf_target', {})
+        sc = len(settings.get('selected_sessions', [])) or None
+        await callback_query.message.edit_text(
+            get_post_forward_settings_message_text(mode, source, target, settings, sc),
+            reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        )
+        msg_text = "Включена" if not current else "Выключена"
+        await safe_answer_callback(callback_query, f"Нативная пересылка: {msg_text}")
+        return True
+
+    if data == "pf_native_check":
+        settings = user_states[user_id].get('post_forward_settings', {})
+        settings['check_content_if_native'] = not settings.get('check_content_if_native', True)
+        user_states[user_id]['post_forward_settings'] = settings
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        source = user_states[user_id].get('pf_source', {})
+        target = user_states[user_id].get('pf_target', {})
+        sc = len(settings.get('selected_sessions', [])) or None
+        await callback_query.message.edit_text(
+            get_post_forward_settings_message_text(mode, source, target, settings, sc),
+            reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        )
+        await safe_answer_callback(callback_query, "Настройка изменена")
+        return True
+
+    if data == "pf_native_source":
+        # Кнопка отображения убрана; отображение только в тексте. Оставляем no-op на случай старого callback.
+        await safe_answer_callback(callback_query)
+        return True
+
+    if data == "pf_settings_back":
+        # Go back to mode selection
+        user_states[user_id]['state'] = FSM_POST_FORWARD_MODE_SELECT
+        await callback_query.message.edit_text(
+            "📨 **Пересылка постов**\n\n"
+            "Выберите режим работы:",
+            reply_markup=get_post_forward_main_keyboard()
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data == "pf_start_task":
+        await create_and_start_post_forward_task(client, callback_query)
+        return True
+    
+    # Handle post parse task actions
+    if data.startswith("pp_pause:"):
+        task_id = int(data.split(":")[1])
+        result = await api_client.stop_post_parse_task(task_id)
+        if result.get('success'):
+            await safe_answer_callback(callback_query, "⏸️ Задача приостановлена")
+            # Refresh status
+            task_result = await api_client.get_post_parse_task(task_id)
+            if task_result.get('success'):
+                task = task_result['task']
+                await callback_query.message.edit_text(
+                    format_post_parse_status(task),
+                    reply_markup=get_post_parse_paused_keyboard(task_id)
+                )
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        return True
+    
+    if data.startswith("pp_resume:"):
+        task_id = int(data.split(":")[1])
+        result = await api_client.start_post_parse_task(task_id)
+        if result.get('success'):
+            await safe_answer_callback(callback_query, "▶️ Задача возобновлена")
+            task_result = await api_client.get_post_parse_task(task_id)
+            if task_result.get('success'):
+                task = task_result['task']
+                await callback_query.message.edit_text(
+                    format_post_parse_status(task),
+                    reply_markup=get_post_parse_running_keyboard(task_id)
+                )
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        return True
+    
+    if data.startswith("pp_delete:"):
+        task_id = int(data.split(":")[1])
+        result = await api_client.delete_post_parse_task(task_id)
+        if result.get('success'):
+            await callback_query.message.edit_text("🗑️ Задача удалена")
+            await safe_answer_callback(callback_query, "Задача удалена")
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        return True
+    
+    if data.startswith("pp_refresh:"):
+        task_id = int(data.split(":")[1])
+        task_result = await api_client.get_post_parse_task(task_id)
+        if task_result.get('success'):
+            task = task_result['task']
+            keyboard = get_post_parse_running_keyboard(task_id) if task['status'] == 'running' else get_post_parse_paused_keyboard(task_id)
+            try:
+                await callback_query.message.edit_text(
+                    format_post_parse_status(task),
+                    reply_markup=keyboard
+                )
+            except MessageNotModified:
+                # Ignore if message hasn't changed
+                pass
+            except Exception as e:
+                logger.error(f"Error refreshing post parse task: {e}")
+            
+            await safe_answer_callback(callback_query, "🔄 Статус обновлен")
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {task_result.get('error')}", show_alert=True)
+        return True
+    
+    if data.startswith("pp_settings:"):
+        task_id = int(data.split(":")[1])
+        
+        # Load current task settings
+        task_result = await api_client.get_post_parse_task(task_id)
+        if not task_result.get('success'):
+            await safe_answer_callback(callback_query, "❌ Не удалось загрузить задачу", show_alert=True)
+            return True
+        
+        task_data = task_result.get('task', {})
+        
+        # Store task_id and current settings in user state
+        user_states[user_id]['editing_task_id'] = task_id
+        user_states[user_id]['editing_task_type'] = 'post_parse'
+        user_states[user_id]['post_forward_settings'] = {
+            'limit': task_data.get('limit'),
+            'delay_seconds': task_data.get('delay_seconds', 2),
+            'delay_every': task_data.get('delay_every', 1),
+            'rotate_sessions': task_data.get('rotate_sessions', False),
+            'rotate_every': task_data.get('rotate_every', 0),
+            'use_proxy': task_data.get('use_proxy', True),
+            'selected_sessions': task_data.get('available_sessions', []),
+            'filter_contacts': task_data.get('filter_contacts', False),
+            'remove_contacts': task_data.get('remove_contacts', False),
+            'skip_on_contacts': task_data.get('skip_on_contacts', False),
+            'parse_direction': task_data.get('parse_direction', 'backward'),
+            'media_filter': task_data.get('media_filter', 'all'),
+            'use_native_forward': task_data.get('use_native_forward', False),
+            'check_content_if_native': task_data.get('check_content_if_native', True),
+            'forward_show_source': task_data.get('forward_show_source', True),
+            'keywords_whitelist': task_data.get('keywords_whitelist', []),
+            'keywords_blacklist': task_data.get('keywords_blacklist', [])
+        }
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS
+        
+        # Show settings keyboard
+        await callback_query.message.edit_text(
+            "⚙️ **Редактирование настроек задачи**\n\n"
+            "Измените нужные параметры, затем нажмите 'Сохранить':",
+            reply_markup=get_post_forward_settings_keyboard(user_states[user_id]['post_forward_settings'], mode="parse", edit_mode=True, task_id=task_id)
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    if data.startswith("pm_settings:"):
+        task_id = int(data.split(":")[1])
+        
+        # Load current task settings
+        task_result = await api_client.get_post_monitoring_task(task_id)
+        if not task_result.get('success'):
+            await safe_answer_callback(callback_query, "❌ Не удалось загрузить задачу", show_alert=True)
+            return True
+        
+        task_data = task_result.get('task', {})
+        
+        # Store task_id and current settings in user state
+        user_states[user_id]['editing_task_id'] = task_id
+        user_states[user_id]['editing_task_type'] = 'post_monitor'
+        user_states[user_id]['post_forward_settings'] = {
+            'limit': task_data.get('limit'),
+            'delay_seconds': task_data.get('delay_seconds', 0),
+            'rotate_sessions': task_data.get('rotate_sessions', False),
+            'rotate_every': task_data.get('rotate_every', 0),
+            'use_proxy': task_data.get('use_proxy', True),
+            'selected_sessions': task_data.get('available_sessions', []),
+            'filter_contacts': task_data.get('filter_contacts', False),
+            'remove_contacts': task_data.get('remove_contacts', False),
+            'skip_on_contacts': task_data.get('skip_on_contacts', False),
+            'media_filter': task_data.get('media_filter', 'all'),
+            'use_native_forward': task_data.get('use_native_forward', False),
+            'check_content_if_native': task_data.get('check_content_if_native', True),
+            'forward_show_source': task_data.get('forward_show_source', True),
+            'keywords_whitelist': task_data.get('keywords_whitelist', []),
+            'keywords_blacklist': task_data.get('keywords_blacklist', [])
+        }
+        user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS
+        
+        # Show settings keyboard
+        await callback_query.message.edit_text(
+            "⚙️ **Редактирование настроек задачи**\n\n"
+            "Измените нужные параметры, затем нажмите 'Сохранить':",
+            reply_markup=get_post_forward_settings_keyboard(user_states[user_id]['post_forward_settings'], mode="monitor", edit_mode=True, task_id=task_id)
+        )
+        await safe_answer_callback(callback_query)
+        return True
+    
+    # Save/Cancel handlers for post tasks
+    if data.startswith("pp_settings_save:"):
+        task_id = int(data.split(":")[1])
+        settings = user_states.get(user_id, {}).get('post_forward_settings', {})
+        
+        # Save settings via API
+        result = await api_client.update_post_parse_task(
+            task_id,
+            limit=settings.get('limit'),
+            delay_seconds=settings.get('delay_seconds'),
+            delay_every=settings.get('delay_every'),
+            rotate_sessions=settings.get('rotate_sessions'),
+            rotate_every=settings.get('rotate_every'),
+            use_proxy=settings.get('use_proxy'),
+            available_sessions=settings.get('selected_sessions'),
+            filter_contacts=settings.get('filter_contacts'),
+            remove_contacts=settings.get('remove_contacts'),
+            skip_on_contacts=settings.get('skip_on_contacts'),
+            parse_direction=settings.get('parse_direction'),
+            media_filter=settings.get('media_filter'),
+            use_native_forward=settings.get('use_native_forward'),
+            check_content_if_native=settings.get('check_content_if_native'),
+            forward_show_source=settings.get('forward_show_source'),
+            keywords_whitelist=settings.get('keywords_whitelist'),
+            keywords_blacklist=settings.get('keywords_blacklist')
+        )
+        
+        if not result.get('success'):
+            await safe_answer_callback(callback_query, "❌ Не удалось сохранить настройки", show_alert=True)
+            return True
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await safe_answer_callback(callback_query, "✅ Настройки сохранены")
+        
+        # Refresh task details
+        task_result = await api_client.get_post_parse_task(task_id)
+        if task_result.get('success'):
+            task = task_result['task']
+            keyboard = get_post_parse_running_keyboard(task_id) if task['status'] == 'running' else get_post_parse_paused_keyboard(task_id)
+            await callback_query.message.edit_text(
+                format_post_parse_status(task),
+                reply_markup=keyboard
+            )
+        return True
+    
+    if data.startswith("pp_settings_cancel:"):
+        task_id = int(data.split(":")[1])
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await safe_answer_callback(callback_query, "Отменено")
+        
+        # Refresh task details
+        task_result = await api_client.get_post_parse_task(task_id)
+        if task_result.get('success'):
+            task = task_result['task']
+            keyboard = get_post_parse_running_keyboard(task_id) if task['status'] == 'running' else get_post_parse_paused_keyboard(task_id)
+            await callback_query.message.edit_text(
+                format_post_parse_status(task),
+                reply_markup=keyboard
+            )
+        return True
+    
+    if data.startswith("pm_settings_save:"):
+        task_id = int(data.split(":")[1])
+        settings = user_states.get(user_id, {}).get('post_forward_settings', {})
+        
+        # Save settings via API
+        result = await api_client.update_post_monitoring_task(
+            task_id,
+            limit=settings.get('limit'),
+            delay_seconds=settings.get('delay_seconds'),
+            rotate_sessions=settings.get('rotate_sessions'),
+            rotate_every=settings.get('rotate_every'),
+            use_proxy=settings.get('use_proxy'),
+            available_sessions=settings.get('selected_sessions'),
+            filter_contacts=settings.get('filter_contacts'),
+            remove_contacts=settings.get('remove_contacts'),
+            skip_on_contacts=settings.get('skip_on_contacts'),
+            media_filter=settings.get('media_filter'),
+            use_native_forward=settings.get('use_native_forward'),
+            check_content_if_native=settings.get('check_content_if_native'),
+            forward_show_source=settings.get('forward_show_source'),
+            keywords_whitelist=settings.get('keywords_whitelist'),
+            keywords_blacklist=settings.get('keywords_blacklist')
+        )
+        
+        if not result.get('success'):
+            await safe_answer_callback(callback_query, "❌ Не удалось сохранить настройки", show_alert=True)
+            return True
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await safe_answer_callback(callback_query, "✅ Настройки сохранены")
+        
+        # Refresh task details
+        task_result = await api_client.get_post_monitoring_task(task_id)
+        if task_result.get('success'):
+            task = task_result['task']
+            keyboard = get_post_monitor_running_keyboard(task_id) if task['status'] == 'running' else get_post_monitor_paused_keyboard(task_id)
+            await callback_query.message.edit_text(
+                format_post_monitor_status(task),
+                reply_markup=keyboard
+            )
+        return True
+    
+    if data.startswith("pm_settings_cancel:"):
+        task_id = int(data.split(":")[1])
+        
+        # Clear editing state
+        user_states[user_id].pop('editing_task_id', None)
+        user_states[user_id].pop('editing_task_type', None)
+        
+        # Redirect to task details
+        await safe_answer_callback(callback_query, "Отменено")
+        
+        # Refresh task details
+        task_result = await api_client.get_post_monitoring_task(task_id)
+        if task_result.get('success'):
+            task = task_result['task']
+            keyboard = get_post_monitor_running_keyboard(task_id) if task['status'] == 'running' else get_post_monitor_paused_keyboard(task_id)
+            await callback_query.message.edit_text(
+                format_post_monitor_status(task),
+                reply_markup=keyboard
+            )
+        return True
+    
+    # Handle post monitor task actions
+    if data.startswith("pm_pause:"):
+        task_id = int(data.split(":")[1])
+        result = await api_client.stop_post_monitoring_task(task_id)
+        if result.get('success'):
+            await safe_answer_callback(callback_query, "⏸️ Мониторинг приостановлен")
+            task_result = await api_client.get_post_monitoring_task(task_id)
+            if task_result.get('success'):
+                task = task_result['task']
+                await callback_query.message.edit_text(
+                    format_post_monitor_status(task),
+                    reply_markup=get_post_monitor_paused_keyboard(task_id)
+                )
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        return True
+    
+    if data.startswith("pm_resume:"):
+        task_id = int(data.split(":")[1])
+        result = await api_client.start_post_monitoring_task(task_id)
+        if result.get('success'):
+            await safe_answer_callback(callback_query, "▶️ Мониторинг возобновлен")
+            task_result = await api_client.get_post_monitoring_task(task_id)
+            if task_result.get('success'):
+                task = task_result['task']
+                await callback_query.message.edit_text(
+                    format_post_monitor_status(task),
+                    reply_markup=get_post_monitor_running_keyboard(task_id)
+                )
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        return True
+    
+    if data.startswith("pm_delete:"):
+        task_id = int(data.split(":")[1])
+        result = await api_client.delete_post_monitoring_task(task_id)
+        if result.get('success'):
+            await callback_query.message.edit_text("🗑️ Мониторинг удален")
+            await safe_answer_callback(callback_query, "Мониторинг удален")
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        return True
+    
+    if data.startswith("pm_refresh:"):
+        task_id = int(data.split(":")[1])
+        task_result = await api_client.get_post_monitoring_task(task_id)
+        if task_result.get('success'):
+            task = task_result['task']
+            keyboard = get_post_monitor_running_keyboard(task_id) if task['status'] == 'running' else get_post_monitor_paused_keyboard(task_id)
+            try:
+                await callback_query.message.edit_text(
+                    format_post_monitor_status(task),
+                    reply_markup=keyboard
+                )
+            except MessageNotModified:
+                # Ignore if message hasn't changed
+                pass
+            except Exception as e:
+                logger.error(f"Error refreshing post monitoring task: {e}")
+            
+            await safe_answer_callback(callback_query, "🔄 Статус обновлен")
+        else:
+            await safe_answer_callback(callback_query, f"❌ Ошибка: {task_result.get('error')}", show_alert=True)
+        return True
+    
+    return False
+
+
+async def show_post_forward_tasks(client: Client, callback_query):
+    """Show list of post forwarding tasks."""
+    user_id = callback_query.from_user.id
+    
+    # Get parse tasks
+    parse_result = await api_client.get_user_post_parse_tasks(user_id)
+    parse_tasks = parse_result.get('tasks', []) if parse_result.get('success') else []
+    
+    # Get monitoring tasks
+    monitor_result = await api_client.get_user_post_monitoring_tasks(user_id)
+    monitor_tasks = monitor_result.get('tasks', []) if monitor_result.get('success') else []
+    
+    if not parse_tasks and not monitor_tasks:
+        await callback_query.message.edit_text(
+            "📋 **Мои задачи пересылки**\n\n"
+            "У вас нет активных задач.\n\n"
+            "Создайте новую задачу с помощью кнопок ниже.",
+            reply_markup=get_post_forward_main_keyboard()
+        )
+        await safe_answer_callback(callback_query)
+        return
+    
+    text = "📋 **Мои задачи пересылки**\n\n"
+    buttons = []
+    
+    if parse_tasks:
+        text += "**📥 Парсинг постов:**\n"
+        for task in parse_tasks[:5]:
+            status_icon = {'running': '🚀', 'paused': '⏸️', 'completed': '✅', 'failed': '❌'}.get(task['status'], '⏳')
+            text += f"• {status_icon} {task['source_title']} → {task['target_title']} ({task['forwarded_count']} пост.)\n"
+            buttons.append([InlineKeyboardButton(
+                f"{status_icon} {task['source_title'][:20]}",
+                callback_data=f"pp_refresh:{task['id']}"
+            )])
+    
+    if monitor_tasks:
+        text += "\n**🔄 Мониторинг постов:**\n"
+        for task in monitor_tasks[:5]:
+            status_icon = {'running': '🚀', 'paused': '⏸️', 'completed': '✅', 'failed': '❌'}.get(task['status'], '⏳')
+            text += f"• {status_icon} {task['source_title']} → {task['target_title']} ({task['forwarded_count']} пост.)\n"
+            buttons.append([InlineKeyboardButton(
+                f"{status_icon} {task['source_title'][:20]}",
+                callback_data=f"pm_refresh:{task['id']}"
+            )])
+    
+    buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="pf_back")])
+    
+    await callback_query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await safe_answer_callback(callback_query)
+
+
+async def create_and_start_post_forward_task(client: Client, callback_query):
+    """Create and start a post forwarding task."""
+    user_id = callback_query.from_user.id
+    state = user_states.get(user_id, {})
+    
+    mode = state.get('post_forward_mode', 'parse')
+    settings = state.get('post_forward_settings', {})
+    source = state.get('pf_source', {})
+    target = state.get('pf_target', {})
+    
+    # Get selected sessions from user's choice
+    available_sessions = settings.get('selected_sessions', [])
+    
+    if not available_sessions:
+        # Fallback: get first session from all sessions
+        sessions_result = await api_client.list_sessions()
+        sessions = sessions_result.get('sessions', [])
+        if not sessions:
+            await safe_answer_callback(callback_query, "❌ Нет доступных сессий", show_alert=True)
+            return
+        available_sessions = [sessions[0]['alias']]
+        logger.warning(f"[POST_FORWARD] No selected sessions, falling back to first: {available_sessions}")
+    
+    # Use first selected session as primary
+    session_alias = available_sessions[0]
+    logger.info(f"[POST_FORWARD] Creating task with session_alias={session_alias}, available_sessions={available_sessions}")
+    
+    try:
+        if mode == 'parse':
+            result = await api_client.create_post_parse_task(
+                user_id=user_id,
+                source_id=source.get('id'),
+                source_title=source.get('title', ''),
+                source_username=source.get('username'),
+                source_type=state.get('pf_source_type', 'channel'),
+                target_id=target.get('id'),
+                target_title=target.get('title', ''),
+                target_username=target.get('username'),
+                target_type=state.get('pf_target_type', 'channel'),
+                session_alias=session_alias,
+                available_sessions=available_sessions,
+                limit=settings.get('limit'),
+                delay_seconds=settings.get('delay_seconds', 2),
+                delay_every=settings.get('delay_every', 1),
+                rotate_sessions=settings.get('rotate_sessions', False),
+                rotate_every=settings.get('rotate_every', 0),
+                use_proxy=settings.get('use_proxy', True),
+                filter_contacts=settings.get('filter_contacts', False),
+                remove_contacts=settings.get('remove_contacts', False),
+                skip_on_contacts=settings.get('skip_on_contacts', False),
+                parse_direction=settings.get('parse_direction', 'backward'),
+                media_filter=settings.get('media_filter', 'all'),
+                use_native_forward=settings.get('use_native_forward', False),
+                check_content_if_native=settings.get('check_content_if_native', True),
+                forward_show_source=settings.get('forward_show_source', True),
+                keywords_whitelist=settings.get('keywords_whitelist', []),
+                keywords_blacklist=settings.get('keywords_blacklist', [])
+            )
+            
+            if result.get('success'):
+                task_id = result['task_id']
+                # Start task
+                await api_client.start_post_parse_task(task_id)
+                
+                await callback_query.message.edit_text(
+                    f"✅ **Задача парсинга постов создана!**\n\n"
+                    f"📤 Источник: {source.get('title', 'N/A')}\n"
+                    f"📥 Цель: {target.get('title', 'N/A')}\n\n"
+                    f"Задача запущена...",
+                    reply_markup=get_post_parse_running_keyboard(task_id)
+                )
+            else:
+                await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+        else:
+            # Monitoring
+            result = await api_client.create_post_monitoring_task(
+                user_id=user_id,
+                source_id=source.get('id'),
+                source_title=source.get('title', ''),
+                source_username=source.get('username'),
+                source_type=state.get('pf_source_type', 'channel'),
+                target_id=target.get('id'),
+                target_title=target.get('title', ''),
+                target_username=target.get('username'),
+                target_type=state.get('pf_target_type', 'channel'),
+                session_alias=session_alias,
+                available_sessions=available_sessions,
+                limit=settings.get('limit'),
+                delay_seconds=settings.get('delay_seconds', 0),
+                rotate_sessions=settings.get('rotate_sessions', False),
+                rotate_every=settings.get('rotate_every', 0),
+                use_proxy=settings.get('use_proxy', True),
+                filter_contacts=settings.get('filter_contacts', False),
+                remove_contacts=settings.get('remove_contacts', False),
+                skip_on_contacts=settings.get('skip_on_contacts', False),
+                use_native_forward=settings.get('use_native_forward', False),
+                check_content_if_native=settings.get('check_content_if_native', True),
+                forward_show_source=settings.get('forward_show_source', True),
+                media_filter=settings.get('media_filter', 'all'),
+                keywords_whitelist=settings.get('keywords_whitelist', []),
+                keywords_blacklist=settings.get('keywords_blacklist', [])
+            )
+            
+            if result.get('success'):
+                task_id = result['task_id']
+                # Start task
+                await api_client.start_post_monitoring_task(task_id)
+                
+                await callback_query.message.edit_text(
+                    f"✅ **Мониторинг постов запущен!**\n\n"
+                    f"📤 Источник: {source.get('title', 'N/A')}\n"
+                    f"📥 Цель: {target.get('title', 'N/A')}\n\n"
+                    f"Новые посты будут пересылаться автоматически.",
+                    reply_markup=get_post_monitor_running_keyboard(task_id)
+                )
+            else:
+                await safe_answer_callback(callback_query, f"❌ Ошибка: {result.get('error')}", show_alert=True)
+    
+    except Exception as e:
+        logger.error(f"Error creating post forward task: {e}")
+        await safe_answer_callback(callback_query, f"❌ Ошибка: {e}", show_alert=True)
+    
+    await safe_answer_callback(callback_query)
+
+
+async def handle_post_forward_text_input(client: Client, message: Message, text: str):
+    """Handle text input for post forwarding flow."""
+    user_id = message.from_user.id
+    state = user_states.get(user_id, {}).get('state')
+    
+    if state == FSM_POST_FORWARD_SOURCE:
+        # Back button
+        if text.strip() == "🔙 Назад":
+            user_states[user_id]['state'] = FSM_POST_FORWARD_SOURCE_TYPE
+            mode = user_states[user_id].get('post_forward_mode', 'parse')
+            mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+            mode_icon = "📥" if mode == 'parse' else "🔄"
+            await message.reply("🔙", reply_markup=ReplyKeyboardRemove())
+            await message.reply(
+                f"{mode_icon} **{mode_name}**\n\n"
+                "📤 **Шаг 2: Выберите тип источника**",
+                reply_markup=get_post_forward_source_type_keyboard()
+            )
+            return
+        
+        # Selection from keyboard (list of channels/groups)
+        group_data = parse_group_button(text)
+        if group_data:
+            group_id = group_data['id']
+            group_title = group_data['title']
+            username = group_data.get('username')
+            user_states[user_id]['pf_source'] = {
+                'id': int(group_id),
+                'title': group_title,
+                'username': username
+            }
+            user_states[user_id]['state'] = FSM_POST_FORWARD_TARGET_TYPE
+            mode = user_states[user_id].get('post_forward_mode', 'parse')
+            mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+            mode_icon = "📥" if mode == 'parse' else "🔄"
+            await message.reply("✅", reply_markup=ReplyKeyboardRemove())
+            await message.reply(
+                f"{mode_icon} **{mode_name}**\n\n"
+                f"✅ Источник: **{group_title}**\n\n"
+                "📥 **Шаг 4: Выберите тип цели:**",
+                reply_markup=get_post_forward_target_type_keyboard()
+            )
+            return
+        
+        # User entered source channel/group manually
+        normalized = normalize_group_input(text)
+        
+        # Get selected sessions - use those assigned by user
+        settings = user_states[user_id].get('post_forward_settings', {})
+        selected_sessions = settings.get('selected_sessions', [])
+        
+        if not selected_sessions:
+            await message.reply(
+                "⚠️ **Сессии не назначены!**\n\n"
+                "Вы не выбрали сессии для этой задачи.\n"
+                "Вернитесь назад и выберите хотя бы одну сессию.",
+                reply_markup=get_main_keyboard()
+            )
+            user_states[user_id]['state'] = FSM_POST_FORWARD_MODE_SELECT
+            return
+        
+        # Try each selected session until one works
+        group_info = None
+        last_error = None
+        failed_sessions = []
+        
+        for session_alias in selected_sessions:
+            group_info = await api_client.get_group_info(session_alias, normalized)
+            
+            if group_info.get('success'):
+                logger.info(f"[POST_FORWARD] Resolved {normalized} using session {session_alias}")
+                break
+            else:
+                last_error = group_info.get('error', 'Неизвестная ошибка')
+                failed_sessions.append(f"• {session_alias}: {last_error}")
+                logger.warning(f"[POST_FORWARD] Session {session_alias} failed to resolve {normalized}: {last_error}")
+        
+        if not group_info or not group_info.get('success'):
+            # All sessions failed - show detailed error
+            error_details = "\n".join(failed_sessions) if failed_sessions else "Неизвестная ошибка"
+            
+            # Format user-friendly error
+            error_msg = format_session_error_message(last_error, selected_sessions[0] if len(selected_sessions) == 1 else None)
+            
+            await message.reply(
+                f"{error_msg}\n\n"
+                f"**Проблемы с сессиями ({len(failed_sessions)}):**\n"
+                f"{error_details}\n\n"
+                "Попробуйте:\n"
+                "• Проверить ссылку на канал/группу\n"
+                "• Убедиться что сессия подключена к каналу/группе\n"
+                "• Выбрать другие сессии"
+            )
+            return
+        
+        # Save source and add to history
+        group_id = str(group_info['id'])
+        group_title = group_info.get('title', f"ID: {group_info['id']}")
+        username = group_info.get('username')
+        user_states[user_id]['pf_source'] = {
+            'id': int(group_id),
+            'title': group_title,
+            'username': username
+        }
+        await api_client.add_user_group(user_id, group_id, group_title, username)
+        
+        # Move to target type selection
+        user_states[user_id]['state'] = FSM_POST_FORWARD_TARGET_TYPE
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+        mode_icon = "📥" if mode == 'parse' else "🔄"
+        await message.reply("✅", reply_markup=ReplyKeyboardRemove())
+        await message.reply(
+            f"{mode_icon} **{mode_name}**\n\n"
+            f"✅ Источник: **{group_title}**\n\n"
+            "📥 **Шаг 4: Выберите тип цели:**",
+            reply_markup=get_post_forward_target_type_keyboard()
+        )
+        return
+    
+    if state == FSM_POST_FORWARD_TARGET:
+        # Back button
+        if text.strip() == "🔙 Назад":
+            user_states[user_id]['state'] = FSM_POST_FORWARD_TARGET_TYPE
+            mode = user_states[user_id].get('post_forward_mode', 'parse')
+            mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+            mode_icon = "📥" if mode == 'parse' else "🔄"
+            source = user_states[user_id].get('pf_source', {})
+            await message.reply("🔙", reply_markup=ReplyKeyboardRemove())
+            await message.reply(
+                f"{mode_icon} **{mode_name}**\n\n"
+                f"✅ Источник: **{source.get('title', 'N/A')}**\n\n"
+                "📥 **Шаг 4: Выберите тип цели:**",
+                reply_markup=get_post_forward_target_type_keyboard()
+            )
+            return
+        
+        # Selection from keyboard (list of channels/groups)
+        group_data = parse_group_button(text)
+        if group_data:
+            group_id = group_data['id']
+            group_title = group_data['title']
+            username = group_data.get('username')
+            user_states[user_id]['pf_target'] = {
+                'id': int(group_id),
+                'title': group_title,
+                'username': username
+            }
+            user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS
+            mode = user_states[user_id].get('post_forward_mode', 'parse')
+            source = user_states[user_id].get('pf_source', {})
+            mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+            mode_icon = "📥" if mode == 'parse' else "🔄"
+            await message.reply("✅", reply_markup=ReplyKeyboardRemove())
+            settings = user_states[user_id].get('post_forward_settings', {})
+            target = user_states[user_id].get('pf_target', {})
+            msg_text = get_post_forward_settings_message_text(
+                mode, source, target, settings, sessions_count=None
+            )
+            await message.reply(
+                msg_text,
+                reply_markup=get_post_forward_settings_keyboard(settings, mode)
+            )
+            return
+        
+        # User entered target channel/group manually
+        normalized = normalize_group_input(text)
+        
+        # Get selected sessions - use those assigned by user
+        settings = user_states[user_id].get('post_forward_settings', {})
+        selected_sessions = settings.get('selected_sessions', [])
+        
+        if not selected_sessions:
+            await message.reply(
+                "⚠️ **Сессии не назначены!**\n\n"
+                "Вы не выбрали сессии для этой задачи.\n"
+                "Вернитесь назад и выберите хотя бы одну сессию.",
+                reply_markup=get_main_keyboard()
+            )
+            user_states[user_id]['state'] = FSM_POST_FORWARD_MODE_SELECT
+            return
+        
+        # Try each selected session until one works
+        group_info = None
+        last_error = None
+        failed_sessions = []
+        
+        for session_alias in selected_sessions:
+            group_info = await api_client.get_group_info(session_alias, normalized)
+            
+            if group_info.get('success'):
+                logger.info(f"[POST_FORWARD] Resolved {normalized} using session {session_alias}")
+                break
+            else:
+                last_error = group_info.get('error', 'Неизвестная ошибка')
+                failed_sessions.append(f"• {session_alias}: {last_error}")
+                logger.warning(f"[POST_FORWARD] Session {session_alias} failed to resolve {normalized}: {last_error}")
+        
+        if not group_info or not group_info.get('success'):
+            # All sessions failed - show detailed error
+            error_details = "\n".join(failed_sessions) if failed_sessions else "Неизвестная ошибка"
+            
+            # Format user-friendly error
+            error_msg = format_session_error_message(last_error, selected_sessions[0] if len(selected_sessions) == 1 else None)
+            
+            await message.reply(
+                f"{error_msg}\n\n"
+                f"**Проблемы с сессиями ({len(failed_sessions)}):**\n"
+                f"{error_details}\n\n"
+                "Попробуйте:\n"
+                "• Проверить ссылку на канал/группу\n"
+                "• Убедиться что сессия подключена к каналу/группе\n"
+                "• Выбрать другие сессии"
+            )
+            return
+        
+        # Save target and add to history
+        group_id = str(group_info['id'])
+        group_title = group_info.get('title', f"ID: {group_info['id']}")
+        username = group_info.get('username')
+        user_states[user_id]['pf_target'] = {
+            'id': int(group_id),
+            'title': group_title,
+            'username': username
+        }
+        await api_client.add_user_target_group(user_id, group_id, group_title, username)
+        
+        # Move to settings
+        # user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS
+        mode = user_states[user_id].get('post_forward_mode', 'parse')
+        # source = user_states[user_id].get('pf_source', {})
+        # mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+        # mode_icon = "📥" if mode == 'parse' else "🔄"
+        await message.reply("✅", reply_markup=ReplyKeyboardRemove())
+        # target = user_states[user_id].get('pf_target', {})
+        # msg_text = get_post_forward_settings_message_text(
+        #     mode, source, target, settings, sessions_count=len(selected_sessions)
+        # )
+        # await message.reply(
+        #     msg_text,
+        #     reply_markup=get_post_forward_settings_keyboard(settings, mode)
+        # )
+        await show_post_forward_settings(client, message)
+        return
+    
+    # Handle settings inputs
+    if state == FSM_POST_FORWARD_SETTINGS_LIMIT:
+        try:
+            if text.lower() in ['0', 'нет', 'без лимита']:
+                user_states[user_id]['post_forward_settings']['limit'] = None
+                await message.reply("✅ Лимит снят")
+            else:
+                limit = int(text)
+                if limit < 1:
+                    limit = None
+                user_states[user_id]['post_forward_settings']['limit'] = limit
+                await message.reply(f"✅ Лимит установлен: {limit}")
+        except ValueError:
+            await message.reply("❌ Введите число или '0' для снятия лимита")
+            return
+        
+        await show_post_forward_settings(client, message)
+        return
+    
+    if state == FSM_POST_FORWARD_SETTINGS_DELAY:
+        try:
+            delay = int(text)
+            if delay < 0:
+                delay = 0
+            user_states[user_id]['post_forward_settings']['delay_seconds'] = delay
+            await message.reply(f"✅ Задержка установлена: {delay} сек")
+        except ValueError:
+            await message.reply("❌ Введите число")
+            return
+        
+        await show_post_forward_settings(client, message)
+        return
+    
+    if state == FSM_POST_FORWARD_SETTINGS_DELAY_EVERY:
+        try:
+            every = int(text)
+            if every < 1:
+                every = 1
+            user_states[user_id]['post_forward_settings']['delay_every'] = every
+            await message.reply(f"✅ Задержка каждые {every} постов")
+        except ValueError:
+            await message.reply("❌ Введите число (минимум 1)")
+            return
+        
+        await show_post_forward_settings(client, message)
+        return
+    
+    if state == FSM_POST_FORWARD_SETTINGS_ROTATE_EVERY:
+        try:
+            rotate = int(text)
+            if rotate < 0:
+                rotate = 0
+            user_states[user_id]['post_forward_settings']['rotate_every'] = rotate
+            if rotate > 0:
+                await message.reply(f"✅ Ротация каждые {rotate} постов")
+            else:
+                await message.reply("✅ Ротация только при ошибках")
+        except ValueError:
+            await message.reply("❌ Введите число")
+            return
+        
+        await show_post_forward_settings(client, message)
+        return
+
+    if state == FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST:
+        if text.lower() in ['нет', '-', 'отмена']:
+            user_states[user_id]['post_forward_settings']['keywords_whitelist'] = []
+            await message.reply("✅ Список обязательных слов очищен")
+        else:
+            words = [w.strip() for w in text.split(',') if w.strip()]
+            user_states[user_id]['post_forward_settings']['keywords_whitelist'] = words
+            await message.reply(f"✅ Установлено {len(words)} обязательных слов")
+        
+        await show_post_forward_settings(client, message)
+        return
+
+    if state == FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST:
+        if text.lower() in ['нет', '-', 'отмена']:
+            user_states[user_id]['post_forward_settings']['keywords_blacklist'] = []
+            await message.reply("✅ Список запрещенных слов очищен")
+        else:
+            words = [w.strip() for w in text.split(',') if w.strip()]
+            user_states[user_id]['post_forward_settings']['keywords_blacklist'] = words
+            await message.reply(f"✅ Установлено {len(words)} запрещенных слов")
+        
+        await show_post_forward_settings(client, message)
+        return
+
+
+async def show_post_forward_settings(client: Client, message: Message):
+    """Show post forward settings menu."""
+    user_id = message.from_user.id
+    user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS
+    
+    mode = user_states[user_id].get('post_forward_mode', 'parse')
+    settings = user_states[user_id].get('post_forward_settings', {})
+    source = user_states[user_id].get('pf_source', {})
+    target = user_states[user_id].get('pf_target', {})
+    
+    msg_text = get_post_forward_settings_message_text(
+        mode, source, target, settings,
+        sessions_count=len(settings.get('selected_sessions', [])) or None
+    )
+    await message.reply(
+        msg_text,
+        reply_markup=get_post_forward_settings_keyboard(settings, mode)
+    )

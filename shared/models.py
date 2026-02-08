@@ -133,3 +133,95 @@ class ParseTask:
     last_action_time: Optional[str] = None  # ISO timestamp of last parse action
     current_session: Optional[str] = None  # Currently active session (for rotation tracking)
 
+
+@dataclass
+class PostParseTask:
+    """Represents a post parsing task (parsing posts from channel/group to another channel/group)."""
+    id: int
+    user_id: int
+    source_id: int  # Source channel/group ID
+    source_title: str
+    source_username: Optional[str] = None
+    source_type: str = "channel"  # "channel" or "group"
+    target_id: int = 0  # Target channel/group ID
+    target_title: str = ""
+    target_username: Optional[str] = None
+    target_type: str = "channel"  # "channel" or "group"
+    session_alias: str = ""
+    status: str = "pending"  # pending, running, paused, completed, failed
+    forwarded_count: int = 0  # Number of posts forwarded (counting media groups as 1)
+    limit: Optional[int] = None  # Stop after N posts
+    delay_seconds: int = 2  # Delay between posts
+    delay_every: int = 1  # Apply delay after every N posts
+    rotate_sessions: bool = False  # Enable session rotation
+    rotate_every: int = 0  # Rotate session every N posts (0 = only on error)
+    use_proxy: bool = True
+    available_sessions: List[str] = field(default_factory=list)
+    failed_sessions: List[str] = field(default_factory=list)
+    current_offset: int = 0  # Current message ID offset for parsing
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error_message: Optional[str] = None
+    # Post filter settings
+    filter_contacts: bool = False  # Filter out posts with contacts (usernames, phones, links)
+    remove_contacts: bool = False  # Remove contacts from posts instead of skipping
+    skip_on_contacts: bool = False  # Skip posts with contacts entirely (don't forward at all)
+    # Direction: backward = from newest to oldest, forward = from oldest to newest
+    parse_direction: str = "backward"
+    # Media filter: all, media_only, text_only
+    media_filter: str = "all"
+    # Native forwarding settings
+    use_native_forward: bool = False  # Use native Telegram forwarding (forward_messages) instead of copying
+    check_content_if_native: bool = True  # Check for content before forwarding (only when use_native_forward=True)
+    forward_show_source: bool = True  # Show "Forwarded from" in forwarded messages (only when use_native_forward=True)
+    # Timing and session tracking
+    last_action_time: Optional[str] = None
+    current_session: Optional[str] = None
+    # Last processed message ID for resume
+    last_message_id: Optional[int] = None
+    # Keyword filters
+    keywords_whitelist: List[str] = field(default_factory=list)
+    keywords_blacklist: List[str] = field(default_factory=list)
+
+@dataclass
+class PostMonitoringTask:
+    """Represents a post monitoring task (real-time forwarding of new posts)."""
+    id: int
+    user_id: int
+    source_id: int  # Source channel/group ID
+    source_title: str
+    source_username: Optional[str] = None
+    source_type: str = "channel"  # "channel" or "group"
+    target_id: int = 0  # Target channel/group ID
+    target_title: str = ""
+    target_username: Optional[str] = None
+    target_type: str = "channel"  # "channel" or "group"
+    session_alias: str = ""
+    status: str = "pending"  # pending, running, paused, completed, failed
+    forwarded_count: int = 0  # Number of posts forwarded (counting media groups as 1)
+    limit: Optional[int] = None  # Stop after N posts (0 = unlimited)
+    delay_seconds: int = 0  # Delay between forwarding
+    rotate_sessions: bool = False  # Enable session rotation
+    rotate_every: int = 0  # Rotate session every N posts (0 = only on error)
+    use_proxy: bool = True
+    available_sessions: List[str] = field(default_factory=list)
+    failed_sessions: List[str] = field(default_factory=list)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    error_message: Optional[str] = None
+    # Post filter settings
+    filter_contacts: bool = False  # Skip posts with contacts (usernames, phones, links)
+    remove_contacts: bool = False  # Remove contacts from posts instead of skipping
+    skip_on_contacts: bool = False  # Skip posts with contacts entirely (don't forward at all)
+    media_filter: str = "all"  # Media filter: all, media_only, text_only
+    # Native forwarding settings
+    use_native_forward: bool = False  # Use native Telegram forwarding (forward_messages) instead of copying
+    check_content_if_native: bool = True  # Check for content before forwarding (only when use_native_forward=True)
+    forward_show_source: bool = True  # Show "Forwarded from" in forwarded messages (only when use_native_forward=True)
+    # Timing and session tracking
+    last_action_time: Optional[str] = None
+    current_session: Optional[str] = None
+    # Keyword filters
+    keywords_whitelist: List[str] = field(default_factory=list)
+    keywords_blacklist: List[str] = field(default_factory=list)
+

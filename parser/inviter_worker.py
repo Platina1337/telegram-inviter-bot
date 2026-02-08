@@ -246,22 +246,27 @@ class InviterWorker:
 
                     # Try to rotate session if enabled (auto-rotate on failure)
                     if task.rotate_sessions and task.available_sessions:
-                        logger.info(f"Сессия {task.session_alias} недоступна, попытка ротации...")
+                        logger.info(f"Сессия {task.session_alias} недоступна{proxy_str}, попытка ротации...")
                         new_session = await self._rotate_session(task)
                         if new_session:
                             session_consecutive_invites = 0
                             continue
 
-                    # If rotation failed or disabled, stop task
-                    error_msg = f"Сессия {task.session_alias} недоступна"
+                    # If rotation failed or disabled, stop task with detailed error
+                    if proxy_info:
+                        error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{task.session_alias}' через прокси {proxy_info}. Прокси недоступен, неверен или заблокирован."
+                    else:
+                        error_msg = f"❌ Сессия '{task.session_alias}' недоступна"
+                    
                     if task.rotate_sessions:
-                        error_msg += " (Ротация не удалась: нет подходящих сессий)"
+                        error_msg += f" | Ротация не удалась: нет работающих сессий среди {task.available_sessions}"
 
                     await self.db.update_invite_task(
                         task_id,
                         status='failed',
                         error_message=error_msg
                     )
+                    logger.error(f"Задача {task_id} остановлена с ошибкой: {error_msg}")
                     break
                 
                 # Get already invited users
@@ -832,32 +837,50 @@ class InviterWorker:
                 
                 # Try to rotate if enabled
                 if task.rotate_sessions and task.available_sessions:
-                    logger.info(f"Задача {task_id}: Клиент недоступен, попытка ротации...")
+                    logger.info(f"Задача {task_id}: Клиент недоступен{proxy_str}, попытка ротации...")
                     new_session = await self._rotate_session(task)
                     if new_session:
                         client = await self.session_manager.get_client(new_session, use_proxy=task.use_proxy)
                         if client:
                             task = await self.db.get_invite_task(task_id)
                         else:
+                            # Even rotated session failed
+                            if proxy_info:
+                                error_msg = f"❌ Ошибка прокси: Сессия '{new_session}' недоступна после ротации. Прокси {proxy_info} неверен или недоступен."
+                            else:
+                                error_msg = f"❌ Сессия '{new_session}' недоступна после ротации"
                             await self.db.update_invite_task(
                                 task_id,
                                 status='failed',
-                                error_message=f"Session {new_session} unavailable after rotation"
+                                error_message=error_msg
                             )
+                            logger.error(f"Задача {task_id} остановлена с ошибкой: {error_msg}")
                             return
                     else:
+                        # Rotation failed
+                        if proxy_info:
+                            error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{task.session_alias}' через прокси {proxy_info}. Ротация не удалась."
+                        else:
+                            error_msg = f"❌ Сессия '{task.session_alias}' недоступна и ротация не удалась"
                         await self.db.update_invite_task(
                             task_id,
                             status='failed',
-                            error_message=f"Session {task.session_alias} unavailable and rotation failed"
+                            error_message=error_msg
                         )
+                        logger.error(f"Задача {task_id} остановлена с ошибкой: {error_msg}")
                         return
                 else:
+                    # No rotation available
+                    if proxy_info:
+                        error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{task.session_alias}' через прокси {proxy_info}. Прокси недоступен или неверен."
+                    else:
+                        error_msg = f"❌ Сессия '{task.session_alias}' недоступна"
                     await self.db.update_invite_task(
                         task_id,
                         status='failed',
-                        error_message=f"Session {task.session_alias} unavailable"
+                        error_message=error_msg
                     )
+                    logger.error(f"Задача {task_id} остановлена с ошибкой: {error_msg}")
                     return
             
             # Get already invited users for this source->target pair
@@ -1470,18 +1493,27 @@ class InviterWorker:
                     logger.error(f"Не удалось получить клиент для сессии {task.session_alias}{proxy_str}")
                     
                     if task.rotate_sessions and task.available_sessions:
-                        logger.info(f"Сессия {task.session_alias} недоступна, попытка ротации...")
+                        logger.info(f"Сессия {task.session_alias} недоступна{proxy_str}, попытка ротации...")
                         new_session = await self._rotate_session(task)
                         if new_session:
                             session_consecutive_invites = 0
                             continue
                     
-                    error_msg = f"Сессия {task.session_alias} недоступна"
+                    # Detailed error message with proxy info
+                    if proxy_info:
+                        error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{task.session_alias}' через прокси {proxy_info}. Прокси недоступен или неверен."
+                    else:
+                        error_msg = f"❌ Сессия '{task.session_alias}' недоступна"
+                    
+                    if task.rotate_sessions:
+                        error_msg += f" | Ротация не удалась: нет работающих сессий среди {task.available_sessions}"
+                    
                     await self.db.update_invite_task(
                         task_id,
                         status='failed',
                         error_message=error_msg
                     )
+                    logger.error(f"Задача {task_id} остановлена с ошибкой: {error_msg}")
                     break
                 
                 # Process batch of users

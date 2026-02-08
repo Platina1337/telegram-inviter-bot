@@ -41,29 +41,33 @@ bot = Client(
 )
 
 
+
+# Define admin filter
+admin_filter = filters.user(config.ADMIN_IDS)
+
 # ============== Handlers ==============
 
-@bot.on_message(filters.command("start") & filters.private)
+@bot.on_message(filters.command("start") & filters.private & admin_filter)
 async def start_handler(client, message):
     """Handle /start command."""
     await start_command(client, message)
 
 
-@bot.on_message(filters.command("sessions") & filters.private)
+@bot.on_message(filters.command("sessions") & filters.private & admin_filter)
 async def sessions_handler(client, message):
     """Handle /sessions command."""
     from bot.session_handlers import sessions_command
     await sessions_command(client, message)
 
 
-@bot.on_message(filters.command("status") & filters.private)
+@bot.on_message(filters.command("status") & filters.private & admin_filter)
 async def status_handler(client, message):
     """Handle /status command."""
     from bot.handlers import show_tasks_status
     await show_tasks_status(client, message)
 
 
-@bot.on_message(filters.text & filters.private)
+@bot.on_message(filters.text & filters.private & admin_filter)
 async def text_message_handler(client, message):
     """Handle all text messages."""
     # Skip commands
@@ -73,7 +77,7 @@ async def text_message_handler(client, message):
     await text_handler(client, message)
 
 
-@bot.on_callback_query()
+@bot.on_callback_query(admin_filter)
 async def callback_query_handler(client, callback_query):
     """Handle all callback queries."""
     try:

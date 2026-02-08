@@ -74,6 +74,22 @@ FSM_FILE_MANAGER_COPY_NAME = "file_manager_copy_name"
 FSM_FILE_MANAGER_RENAME = "file_manager_rename"
 FSM_FILE_MANAGER_FILTER_KEYWORD = "file_manager_filter_keyword"
 
+# Post Forwarding states (post parse and post monitoring)
+FSM_POST_FORWARD_SOURCE_TYPE = "post_forward_source_type"  # channel or group
+FSM_POST_FORWARD_SOURCE = "post_forward_source"  # enter source channel/group
+FSM_POST_FORWARD_TARGET_TYPE = "post_forward_target_type"  # channel or group
+FSM_POST_FORWARD_TARGET = "post_forward_target"  # enter target channel/group
+FSM_POST_FORWARD_SESSION_SELECT = "post_forward_session_select"
+FSM_POST_FORWARD_MODE_SELECT = "post_forward_mode_select"  # parse or monitoring
+FSM_POST_FORWARD_SETTINGS = "post_forward_settings"
+FSM_POST_FORWARD_SETTINGS_LIMIT = "post_forward_settings_limit"
+FSM_POST_FORWARD_SETTINGS_DELAY = "post_forward_settings_delay"
+FSM_POST_FORWARD_SETTINGS_DELAY_EVERY = "post_forward_settings_delay_every"
+FSM_POST_FORWARD_SETTINGS_ROTATE_EVERY = "post_forward_settings_rotate_every"
+FSM_POST_FORWARD_SETTINGS_NATIVE = "post_forward_settings_native"
+FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST = "post_forward_settings_keywords_whitelist"
+FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST = "post_forward_settings_keywords_blacklist"
+
 # ============== User State Keys (standardized) ==============
 # Use these constants instead of raw strings for consistency
 STATE_KEY = 'state'
@@ -154,6 +170,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("👥 Инвайтинг")],
         [KeyboardButton("🔍 Парсинг в файл")],
+        [KeyboardButton("📨 Пересылка постов")],
         [KeyboardButton("📁 Менеджер файлов")],
         [KeyboardButton("📊 Статус задач")],
         [KeyboardButton("🔐 Сессии")]
@@ -251,6 +268,7 @@ def get_invite_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for running invite task."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"invite_pause:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"invite_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"invite_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")]
     ])
@@ -260,6 +278,7 @@ def get_invite_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for paused invite task."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"invite_resume:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"invite_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"invite_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")]
     ])
@@ -269,6 +288,7 @@ def get_parse_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for running parse task."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"parse_pause:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"parse_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"parse_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")]
     ])
@@ -278,12 +298,13 @@ def get_parse_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Keyboard for paused parse task."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"parse_resume:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"parse_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"parse_delete:{task_id}")],
         [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")]
     ])
 
 
-def get_settings_keyboard(current_settings: Dict = None) -> InlineKeyboardMarkup:
+def get_settings_keyboard(current_settings: Dict = None, edit_mode: bool = False) -> InlineKeyboardMarkup:
     """Settings menu keyboard."""
     settings = current_settings or {}
     
@@ -312,7 +333,7 @@ def get_settings_keyboard(current_settings: Dict = None) -> InlineKeyboardMarkup
 
     inactive_threshold_text = f"{inactive_threshold_days} дн." if inactive_threshold_days is not None else "Выкл."
     
-    return InlineKeyboardMarkup([
+    buttons = [
         [InlineKeyboardButton(f"⏱️ Задержка: {delay} сек", callback_data="settings_delay")],
         [InlineKeyboardButton(f"🔢 Каждые {delay_every} инвайта", callback_data="settings_delay_every")],
         [InlineKeyboardButton(f"🔢 Лимит: {limit_text}", callback_data="settings_limit")],
@@ -322,8 +343,15 @@ def get_settings_keyboard(current_settings: Dict = None) -> InlineKeyboardMarkup
         [InlineKeyboardButton(f"👥 Фильтр: {filter_mode_text}", callback_data="settings_filter_mode")],
         [InlineKeyboardButton(f"🛌 Неактивен >: {inactive_threshold_text}", callback_data="settings_inactive_threshold_days")],
         [InlineKeyboardButton("🔐 Выбор сессий", callback_data="settings_sessions")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="settings_back")]
-    ])
+    ]
+    
+    if edit_mode:
+        buttons.append([InlineKeyboardButton("💾 Сохранить", callback_data="invite_settings_save")])
+        buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="invite_settings_cancel")])
+    else:
+        buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="settings_back")])
+    
+    return InlineKeyboardMarkup(buttons)
 
 
 async def get_session_select_keyboard(selected_aliases: List[str] = None) -> InlineKeyboardMarkup:
@@ -387,6 +415,10 @@ def get_task_assignment_keyboard(session_alias: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❌ Убрать из инвайтинга", callback_data=f"remove_task:inviting:{session_alias}")],
         [InlineKeyboardButton("🔍 Парсинг", callback_data=f"assign_task:parsing:{session_alias}")],
         [InlineKeyboardButton("❌ Убрать из парсинга", callback_data=f"remove_task:parsing:{session_alias}")],
+        [InlineKeyboardButton("📥 Парсинг постов", callback_data=f"assign_task:post_parsing:{session_alias}")],
+        [InlineKeyboardButton("❌ Убрать из парсинга постов", callback_data=f"remove_task:post_parsing:{session_alias}")],
+        [InlineKeyboardButton("🔄 Мониторинг постов", callback_data=f"assign_task:post_monitoring:{session_alias}")],
+        [InlineKeyboardButton("❌ Убрать из мониторинга постов", callback_data=f"remove_task:post_monitoring:{session_alias}")],
         [InlineKeyboardButton("🌐 Настроить прокси", callback_data=f"set_proxy:{session_alias}")],
         [InlineKeyboardButton("🧪 Проверить прокси", callback_data=f"test_proxy:{session_alias}")],
         [InlineKeyboardButton("🗑️ Удалить прокси", callback_data=f"remove_proxy:{session_alias}")],
@@ -703,22 +735,34 @@ def format_sessions_list(sessions: List[Dict], assignments: Dict) -> str:
     text += "\n**Назначения:**\n"
     inviting_sessions = assignments.get('inviting', [])
     if inviting_sessions:
-        text += f"- Инвайтинг: {', '.join(inviting_sessions)}\n"
+        text += f"- 👥 Инвайтинг: {', '.join(inviting_sessions)}\n"
     else:
-        text += "- Инвайтинг: не назначено\n"
+        text += "- 👥 Инвайтинг: не назначено\n"
     
     parsing_sessions = assignments.get('parsing', [])
     if parsing_sessions:
-        text += f"- Парсинг: {', '.join(parsing_sessions)}\n"
+        text += f"- 🔍 Парсинг: {', '.join(parsing_sessions)}\n"
     else:
-        text += "- Парсинг: не назначено\n"
+        text += "- 🔍 Парсинг: не назначено\n"
+    
+    post_parsing_sessions = assignments.get('post_parsing', [])
+    if post_parsing_sessions:
+        text += f"- 📥 Парсинг постов: {', '.join(post_parsing_sessions)}\n"
+    else:
+        text += "- 📥 Парсинг постов: не назначено\n"
+    
+    post_monitoring_sessions = assignments.get('post_monitoring', [])
+    if post_monitoring_sessions:
+        text += f"- 🔄 Мониторинг постов: {', '.join(post_monitoring_sessions)}\n"
+    else:
+        text += "- 🔄 Мониторинг постов: не назначено\n"
 
     return text
 
 
 # ============== Parsing to File Keyboards ==============
 
-def get_parse_settings_keyboard(current_settings: Dict = None) -> InlineKeyboardMarkup:
+def get_parse_settings_keyboard(current_settings: Dict = None, edit_mode: bool = False) -> InlineKeyboardMarkup:
     """Settings menu keyboard for parsing."""
     settings = current_settings or {}
     
@@ -730,7 +774,7 @@ def get_parse_settings_keyboard(current_settings: Dict = None) -> InlineKeyboard
     use_proxy = settings.get('use_proxy', True)
     filter_admins = settings.get('filter_admins', False)
     filter_inactive = settings.get('filter_inactive', False)
-    inactive_days = settings.get('inactive_days', 30)
+    inactive_days = settings.get('inactive_threshold_days', 30)
     
     # New message-based mode settings
     parse_mode = settings.get('parse_mode', 'member_list')
@@ -741,7 +785,7 @@ def get_parse_settings_keyboard(current_settings: Dict = None) -> InlineKeyboard
     save_every_text = f"{save_every} польз." if save_every > 0 else "В конце"
     rotate_text = "✅" if rotate else "❌"
     proxy_text = "✅" if use_proxy else "❌"
-    rotate_every_text = f"{rotate_every} польз." if rotate and rotate_every > 0 else "При ошибке"
+    rotate_every_text = f"{rotate_every} польz." if rotate and rotate_every > 0 else "При ошибке"
     filter_admins_text = "✅" if filter_admins else "❌"
     filter_inactive_text = "✅" if filter_inactive else "❌"
     
@@ -756,8 +800,8 @@ def get_parse_settings_keyboard(current_settings: Dict = None) -> InlineKeyboard
     # Common buttons
     buttons = []
     
-    # Only show mode selection button for groups (not for channels)
-    if source_type == 'group':
+    # Only show mode selection button for groups (not for channels) and not in edit mode
+    if source_type == 'group' and not edit_mode:
         buttons.append([InlineKeyboardButton(f"📋 Режим: {mode_text}", callback_data="parse_mode_select")])
     
     if parse_mode == 'message_based':
@@ -808,11 +852,14 @@ def get_parse_settings_keyboard(current_settings: Dict = None) -> InlineKeyboard
             [InlineKeyboardButton(f"📅 Неактивен более: {inactive_days} дн.", callback_data="parse_inactive_days")],
         ])
     
-    buttons.extend([
-        [InlineKeyboardButton("🔐 Выбор сессий", callback_data="parse_settings_sessions")],
-        [InlineKeyboardButton("🚀 Начать парсинг", callback_data="parse_start")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="parse_back")]
-    ])
+    buttons.append([InlineKeyboardButton("🔐 Выбор сессий", callback_data="parse_settings_sessions")])
+    
+    if edit_mode:
+        buttons.append([InlineKeyboardButton("💾 Сохранить", callback_data="parse_settings_save")])
+        buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="parse_settings_cancel")])
+    else:
+        buttons.append([InlineKeyboardButton("🚀 Начать парсинг", callback_data="parse_start")])
+        buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="parse_settings_back")])
     
     return InlineKeyboardMarkup(buttons)
 
@@ -1012,3 +1059,431 @@ def format_file_stats(stats: Dict) -> str:
 • Группа: {source_group}
 """
     return text
+
+
+# ============== Post Forwarding Keyboards ==============
+
+def get_post_forward_main_keyboard() -> InlineKeyboardMarkup:
+    """Main keyboard for post forwarding feature."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Парсинг постов", callback_data="post_parse_start")],
+        [InlineKeyboardButton("🔄 Мониторинг постов", callback_data="post_monitor_start")],
+        [InlineKeyboardButton("📋 Мои задачи", callback_data="post_forward_tasks")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="post_forward_back")]
+    ])
+
+
+def get_post_forward_source_type_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for selecting source type (channel or group)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Канал", callback_data="pf_source_type:channel")],
+        [InlineKeyboardButton("👥 Группа", callback_data="pf_source_type:group")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="pf_back")]
+    ])
+
+
+def get_post_forward_target_type_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for selecting target type (channel or group)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Канал", callback_data="pf_target_type:channel")],
+        [InlineKeyboardButton("👥 Группа", callback_data="pf_target_type:group")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="pf_back")]
+    ])
+
+
+def get_post_forward_mode_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for selecting forwarding mode (parse historic or monitor live)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Парсинг (исторические посты)", callback_data="pf_mode:parse")],
+        [InlineKeyboardButton("🔄 Мониторинг (в реальном времени)", callback_data="pf_mode:monitor")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="pf_back")]
+    ])
+
+
+def get_post_forward_settings_message_text(
+    mode: str,
+    source: Dict,
+    target: Dict,
+    settings: Dict,
+    sessions_count: Optional[int] = None,
+) -> str:
+    """Текст сообщения настроек пересылки с отображением «С источником»/«Без источника» по режиму."""
+    mode_name = "Парсинг постов" if mode == 'parse' else "Мониторинг постов"
+    mode_icon = "📥" if mode == 'parse' else "🔄"
+    use_native = settings.get('use_native_forward', False)
+    display_line = "👀 Отображение: С источником" if use_native else "👀 Отображение: Без источника"
+    lines = [
+        f"{mode_icon} **{mode_name}**\n",
+        "✅ **Настройки пересылки**\n",
+        f"📤 Источник: {source.get('title', 'N/A')}\n",
+        f"📥 Цель: {target.get('title', 'N/A')}\n",
+    ]
+    if sessions_count is not None:
+        lines.append(f"🔐 Сессий выбрано: {sessions_count}\n")
+    lines.append(f"\n{display_line}\n\n")
+    lines.append("Настройте параметры или нажмите 🚀 Запустить:")
+    return "".join(lines)
+
+
+def get_post_forward_settings_keyboard(current_settings: Dict = None, mode: str = "parse", edit_mode: bool = False, task_id: int = None) -> InlineKeyboardMarkup:
+    """Settings keyboard for post forwarding task."""
+    settings = current_settings or {}
+    
+    limit = settings.get('limit')
+    delay = settings.get('delay_seconds', 2 if mode == 'parse' else 0)
+    delay_every = settings.get('delay_every', 1)
+    rotate = settings.get('rotate_sessions', False)
+    rotate_every = settings.get('rotate_every', 0)
+    use_proxy = settings.get('use_proxy', True)
+    
+    # Native settings
+    use_native_forward = settings.get('use_native_forward', False)
+    check_content_if_native = settings.get('check_content_if_native', True)
+    forward_show_source = settings.get('forward_show_source', True)
+    
+    # Determine contact action mode
+    skip_on_contacts = settings.get('skip_on_contacts', False)
+    remove_contacts = settings.get('remove_contacts', False)
+    
+    if skip_on_contacts:
+        contact_action_text = "🚫 Пропускать"
+    elif remove_contacts:
+        contact_action_text = "✏️ Редактировать"
+    else:
+        contact_action_text = "➖ Игнорировать"
+
+    if use_native_forward:
+        if skip_on_contacts:
+            contact_action_text = "🚫 Пропускать"
+        else:
+            contact_action_text = "➖ Игнорировать"
+        # Media filter not applicable in native mode
+        media_text = "🔒 Все (Нативная)"
+    else:
+        # Media filter applicable for both parse and monitoring in copy mode
+        media_filter = settings.get('media_filter', 'all')
+        media_text = {"all": "Все", "media_only": "Только медиа", "text_only": "Только текст"}.get(media_filter, "Все")
+
+    
+    limit_text = str(limit) if limit else "Без лимита"
+    rotate_text = "✅" if rotate else "❌"
+    proxy_text = "✅" if use_proxy else "❌"
+    rotate_every_text = f"{rotate_every} пост." if rotate and rotate_every > 0 else "При ошибке"
+
+    # Keywords info
+    whitelist = settings.get('keywords_whitelist', [])
+    blacklist = settings.get('keywords_blacklist', [])
+    whitelist_text = f"{len(whitelist)} слов" if whitelist else "Нет"
+    blacklist_text = f"{len(blacklist)} слов" if blacklist else "Нет"
+    
+    buttons = [
+        [InlineKeyboardButton(f"🔢 Лимит постов: {limit_text}", callback_data="pf_settings_limit")],
+    ]
+    
+    # Delay only for parse mode
+    if mode == "parse":
+        buttons.append([InlineKeyboardButton(f"⏱️ Задержка: {delay} сек", callback_data="pf_settings_delay")])
+        buttons.append([InlineKeyboardButton(f"🔢 Каждые {delay_every} пост.", callback_data="pf_settings_delay_every")])
+        
+        parse_direction = settings.get('parse_direction', 'backward')
+        direction_text = "⬅️ Старые первыми" if parse_direction == 'backward' else "➡️ Новые первыми"
+        buttons.append([InlineKeyboardButton(f"📋 Направление: {direction_text}", callback_data="pf_settings_direction")])
+        
+        
+    buttons.append([InlineKeyboardButton(f"🎬 Фильтр: {media_text}", callback_data="pf_settings_media_filter")])
+    
+    buttons.extend([
+        [InlineKeyboardButton(f"✅ Включая слова: {whitelist_text}", callback_data="pf_settings_whitelist")],
+        [InlineKeyboardButton(f"🚫 Исключая слова: {blacklist_text}", callback_data="pf_settings_blacklist")],
+        [InlineKeyboardButton(f"🔄 Ротация сессий: {rotate_text}", callback_data="pf_settings_rotate")],
+        [InlineKeyboardButton(f"🔄 Ротация каждые: {rotate_every_text}", callback_data="pf_settings_rotate_every")],
+        [InlineKeyboardButton(f"🌐 Использовать прокси: {proxy_text}", callback_data="pf_settings_proxy")],
+    ])
+
+    # Native & content settings
+    native_text = "✅ Вкл" if use_native_forward else "❌ Выкл"
+    buttons.append([InlineKeyboardButton(f"⚡ Нативная пересылка: {native_text}", callback_data="pf_native_toggle")])
+
+    if use_native_forward:
+        # Native ON: only "Проверять контент". Отображение с/без источника — только в тексте сообщения.
+        check_text = "✅ Да" if check_content_if_native else "❌ Нет"
+        buttons.append([InlineKeyboardButton(f"📝 Проверять контент: {check_text}", callback_data="pf_native_check")])
+
+    buttons.append([InlineKeyboardButton(f"📞 При контактах: {contact_action_text}", callback_data="pf_settings_contact_action")])
+    
+    # Bottom buttons depend on edit_mode
+    if edit_mode:
+        # In edit mode: Save and Cancel buttons
+        if mode == "parse":
+            buttons.append([InlineKeyboardButton("💾 Сохранить", callback_data=f"pp_settings_save:{task_id}")])
+            buttons.append([InlineKeyboardButton("❌ Отмена", callback_data=f"pp_settings_cancel:{task_id}")])
+        else:  # monitor mode
+            buttons.append([InlineKeyboardButton("💾 Сохранить", callback_data=f"pm_settings_save:{task_id}")])
+            buttons.append([InlineKeyboardButton("❌ Отмена", callback_data=f"pm_settings_cancel:{task_id}")])
+    else:
+        # In create mode: Start and Back buttons
+        buttons.append([InlineKeyboardButton("🚀 Запустить", callback_data="pf_start_task")])
+        buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="pf_settings_back")])
+    
+    return InlineKeyboardMarkup(buttons)
+
+
+async def get_post_forward_session_keyboard(selected_aliases: List[str] = None, sessions: List[Dict] = None) -> InlineKeyboardMarkup:
+    """Keyboard for selecting sessions for post forwarding task.
+    
+    Args:
+        selected_aliases: List of already selected session aliases
+        sessions: Optional list of sessions (to avoid API call if already fetched)
+    """
+    selected = selected_aliases or []
+    
+    if sessions is None:
+        result = await api_client.list_sessions()
+        sessions = result.get('sessions', [])
+    
+    if not sessions:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚠️ Нет доступных сессий", callback_data="pf_no_sessions")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="pf_sessions_back")]
+        ])
+    
+    buttons = []
+    for session in sessions:
+        alias = session.get('alias', '')
+        phone = session.get('phone', '')
+        is_active = session.get('is_active', False)
+        is_selected = alias in selected
+        
+        # Show status indicator based on is_active field
+        status_icon = "🟢" if is_active else "🔴"
+        
+        prefix = "✅" if is_selected else "⬜"
+        btn_text = f"{prefix} {status_icon} {alias} ({phone})"
+        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"pf_toggle_session:{alias}")])
+    
+    # Show selected count
+    count_text = f"Выбрано: {len(selected)}" if selected else "Выберите хотя бы одну сессию"
+    buttons.append([InlineKeyboardButton(f"📊 {count_text}", callback_data="pf_sessions_info")])
+    
+    if selected:
+        buttons.append([InlineKeyboardButton("✅ Готово", callback_data="pf_sessions_done")])
+    
+    buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="pf_sessions_back")])
+    
+    return InlineKeyboardMarkup(buttons)
+
+
+def format_session_error_message(error: str, session_alias: str = None) -> str:
+    """Format user-friendly error message for session issues."""
+    error_lower = error.lower() if error else ""
+    
+    if "клиент недоступен" in error_lower or "client unavailable" in error_lower:
+        session_info = f" ({session_alias})" if session_alias else ""
+        return (
+            f"❌ **Сессия недоступна{session_info}**\n\n"
+            "Возможные причины:\n"
+            "• Сессия отключена или заблокирована\n"
+            "• Проблемы с авторизацией\n"
+            "• Сессия требует повторного входа\n\n"
+            "Проверьте сессию в меню 🔐 **Сессии**"
+        )
+    
+    if "peer" in error_lower or "not found" in error_lower:
+        return (
+            "❌ **Канал/группа не найден(а)**\n\n"
+            "Возможные причины:\n"
+            "• Неверная ссылка или ID\n"
+            "• Канал/группа закрытый и сессия не является участником\n"
+            "• Канал/группа был удалён\n\n"
+            "Проверьте ссылку и попробуйте снова."
+        )
+    
+    if "flood" in error_lower:
+        return (
+            "⏳ **Слишком много запросов (FloodWait)**\n\n"
+            "Telegram ограничил частоту запросов для этой сессии.\n"
+            "Подождите несколько минут и попробуйте снова."
+        )
+    
+    if "banned" in error_lower or "blocked" in error_lower:
+        session_info = f" ({session_alias})" if session_alias else ""
+        return (
+            f"🚫 **Сессия заблокирована{session_info}**\n\n"
+            "Эта сессия была заблокирована Telegram.\n"
+            "Используйте другую сессию или создайте новую."
+        )
+    
+    # Default error message
+    return f"❌ **Ошибка:** {error}"
+
+
+def get_post_parse_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Keyboard for running post parse task."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"pp_pause:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pp_settings:{task_id}")],
+        [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pp_delete:{task_id}")],
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pp_refresh:{task_id}")]
+    ])
+
+
+def get_post_parse_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Keyboard for paused post parse task."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Продолжить", callback_data=f"pp_resume:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pp_settings:{task_id}")],
+        [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pp_delete:{task_id}")],
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pp_refresh:{task_id}")]
+    ])
+
+
+def get_post_monitor_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Keyboard for running post monitoring task."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"pm_pause:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pm_settings:{task_id}")],
+        [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pm_delete:{task_id}")],
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pm_refresh:{task_id}")]
+    ])
+
+
+def get_post_monitor_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Keyboard for paused post monitoring task."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Продолжить", callback_data=f"pm_resume:{task_id}")],
+        [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pm_settings:{task_id}")],
+        [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pm_delete:{task_id}")],
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pm_refresh:{task_id}")]
+    ])
+
+
+def format_post_parse_status(task_data: Dict) -> str:
+    """Format post parse task status message."""
+    status_icons = {
+        'pending': '⏳',
+        'running': '🚀',
+        'paused': '⏸️',
+        'completed': '✅',
+        'failed': '❌'
+    }
+    status_names = {
+        'pending': 'Ожидание',
+        'running': 'Выполняется',
+        'paused': 'Приостановлено',
+        'completed': 'Завершено',
+        'failed': 'Ошибка'
+    }
+    
+    status = task_data.get('status', 'pending')
+    icon = status_icons.get(status, '❓')
+    status_text = status_names.get(status, status.capitalize())
+    
+    forwarded = task_data.get('forwarded_count', 0)
+    limit = task_data.get('limit')
+    limit_text = f"/{limit}" if limit else ""
+    
+    rotate = task_data.get('rotate_sessions', False)
+    rotate_every = task_data.get('rotate_every', 0)
+    rotate_info = 'Да' if rotate else 'Нет'
+    if rotate and rotate_every > 0:
+        rotate_info += f" (каждые {rotate_every} пост.)"
+    
+    proxy_info = 'Да' if task_data.get('use_proxy') else 'Нет'
+    filter_contacts_info = 'Да' if task_data.get('filter_contacts') else 'Нет'
+    remove_contacts_info = 'Да' if task_data.get('remove_contacts') else 'Нет'
+    
+    direction = task_data.get('parse_direction', 'backward')
+    direction_text = "Старые первыми" if direction == 'backward' else "Новые первыми"
+    
+    media_filter = task_data.get('media_filter', 'all')
+    media_text = {"all": "Все", "media_only": "Только медиа", "text_only": "Только текст"}.get(media_filter, "Все")
+    
+    available_sessions = task_data.get('available_sessions', [])
+    sessions_text = ', '.join(available_sessions) if available_sessions else task_data.get('session', 'N/A')
+    
+    text = f"""
+{icon} **Статус парсинга постов**
+
+📤 Источник: {task_data.get('source_title', 'N/A')} ({task_data.get('source_type', 'channel')})
+📥 Цель: {task_data.get('target_title', 'N/A')} ({task_data.get('target_type', 'channel')})
+
+📨 Переслано: {forwarded}{limit_text}
+📋 Направление: {direction_text}
+🎬 Фильтр медиа: {media_text}
+⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек (каждые {task_data.get('delay_every', 1)} пост.)
+🔐 Сессия: {task_data.get('session', 'N/A')}
+📋 Сессии: {sessions_text}
+🔄 Ротация: {rotate_info}
+🌐 Прокси: {proxy_info}
+📞 Фильтр контактов: {filter_contacts_info}
+🗑️ Удалять контакты: {remove_contacts_info}
+
+📋 Статус: {status_text}
+"""
+    
+    if task_data.get('error_message'):
+        text += f"\n⚠️ Ошибка: {task_data['error_message']}"
+    
+    return text.strip()
+
+
+def format_post_monitor_status(task_data: Dict) -> str:
+    """Format post monitoring task status message."""
+    status_icons = {
+        'pending': '⏳',
+        'running': '🚀',
+        'paused': '⏸️',
+        'completed': '✅',
+        'failed': '❌'
+    }
+    status_names = {
+        'pending': 'Ожидание',
+        'running': 'Выполняется',
+        'paused': 'Приостановлено',
+        'completed': 'Завершено',
+        'failed': 'Ошибка'
+    }
+    
+    status = task_data.get('status', 'pending')
+    icon = status_icons.get(status, '❓')
+    status_text = status_names.get(status, status.capitalize())
+    
+    forwarded = task_data.get('forwarded_count', 0)
+    limit = task_data.get('limit')
+    limit_text = f"/{limit}" if limit else " (без лимита)"
+    
+    rotate = task_data.get('rotate_sessions', False)
+    rotate_every = task_data.get('rotate_every', 0)
+    rotate_info = 'Да' if rotate else 'Нет'
+    if rotate and rotate_every > 0:
+        rotate_info += f" (каждые {rotate_every} пост.)"
+    
+    proxy_info = 'Да' if task_data.get('use_proxy') else 'Нет'
+    filter_contacts_info = 'Да' if task_data.get('filter_contacts') else 'Нет'
+    remove_contacts_info = 'Да' if task_data.get('remove_contacts') else 'Нет'
+    
+    available_sessions = task_data.get('available_sessions', [])
+    sessions_text = ', '.join(available_sessions) if available_sessions else task_data.get('session', 'N/A')
+    
+    text = f"""
+{icon} **Статус мониторинга постов**
+
+📤 Источник: {task_data.get('source_title', 'N/A')} ({task_data.get('source_type', 'channel')})
+📥 Цель: {task_data.get('target_title', 'N/A')} ({task_data.get('target_type', 'channel')})
+
+📨 Переслано: {forwarded}{limit_text}
+⏱️ Задержка: {task_data.get('delay_seconds', 0)} сек
+🔐 Сессия: {task_data.get('session', 'N/A')}
+📋 Сессии: {sessions_text}
+🔄 Ротация: {rotate_info}
+🌐 Прокси: {proxy_info}
+📞 Фильтр контактов: {filter_contacts_info}
+🗑️ Удалять контакты: {remove_contacts_info}
+
+📋 Статус: {status_text}
+"""
+    
+    if task_data.get('error_message'):
+        text += f"\n⚠️ Ошибка: {task_data['error_message']}"
+    
+    return text.strip()

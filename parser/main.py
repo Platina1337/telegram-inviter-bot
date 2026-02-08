@@ -22,6 +22,7 @@ from parser.database import Database
 from parser.session_manager import SessionManager
 from parser.inviter_worker import InviterWorker
 from parser.parser_worker import ParserWorker
+from parser.post_forwarder import PostForwarder, init_post_forwarder
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
@@ -39,12 +40,13 @@ db: Database = None
 session_manager: SessionManager = None
 inviter_worker: InviterWorker = None
 parser_worker: ParserWorker = None
+post_forwarder: PostForwarder = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    global db, session_manager, inviter_worker, parser_worker
+    global db, session_manager, inviter_worker, parser_worker, post_forwarder
     
     # Startup
     logger.info("Запуск сервиса Inviter Parser...")
@@ -64,6 +66,9 @@ async def lifespan(app: FastAPI):
     # Initialize parser worker
     parser_worker = ParserWorker(db, session_manager)
     
+    # Initialize post forwarder
+    post_forwarder = await init_post_forwarder(db, session_manager)
+    
     # Resume any running invite tasks
     running_tasks = await db.get_running_tasks()
     for task in running_tasks:
@@ -76,52 +81,87 @@ async def lifespan(app: FastAPI):
         logger.info(f"Resuming parse task {task.id}")
         await parser_worker.start_parse_task(task.id)
     
+    # Resume any running post parse tasks
+    running_post_parse_tasks = await db.get_running_post_parse_tasks()
+    for task in running_post_parse_tasks:
+        logger.info(f"Resuming post parse task {task.id}")
+        await post_forwarder.start_post_parse_task(task.id)
+    
+    # Resume any running post monitoring tasks
+    running_post_monitor_tasks = await db.get_running_post_monitoring_tasks()
+    for task in running_post_monitor_tasks:
+        logger.info(f"Resuming post monitoring task {task.id}")
+        await post_forwarder.start_post_monitoring_task(task.id)
+    
     logger.info("Сервис Inviter Parser успешно запущен")
     
     yield
     
     # ============== Graceful Shutdown ==============
-    logger.info("Остановка сервиса Inviter Parser...")
-    
-    # Stop all running invite tasks gracefully
     try:
-        running_invite_tasks = await db.get_running_tasks()
-        for task in running_invite_tasks:
-            logger.info(f"Gracefully stopping invite task {task.id}...")
-            try:
-                await inviter_worker.stop_invite_task(task.id)
-                # Mark as paused so it can resume on restart
-                await db.update_invite_task(task.id, status='paused')
-                logger.info(f"Invite task {task.id} paused for graceful shutdown")
-            except Exception as e:
-                logger.error(f"Error stopping invite task {task.id}: {e}")
-    except Exception as e:
-        logger.error(f"Error during invite tasks shutdown: {e}")
-    
-    # Stop all running parse tasks gracefully
-    try:
-        running_parse_tasks = await db.get_running_parse_tasks()
-        for task in running_parse_tasks:
-            logger.info(f"Gracefully stopping parse task {task.id}...")
-            try:
-                await parser_worker.stop_parse_task(task.id)
-                # Mark as paused so it can resume on restart
-                await db.update_parse_task(task.id, status='paused')
-                logger.info(f"Parse task {task.id} paused for graceful shutdown")
-            except Exception as e:
-                logger.error(f"Error stopping parse task {task.id}: {e}")
-    except Exception as e:
-        logger.error(f"Error during parse tasks shutdown: {e}")
-    
-    # Give tasks time to finish current operation
-    await asyncio.sleep(1)
-    
-    # Stop session manager
-    await session_manager.stop_all()
-    
-    # Close database
-    await db.close()
-    logger.info("Сервис Inviter Parser остановлен")
+        logger.info("Остановка сервиса Inviter Parser...")
+        
+        # Stop all running invite tasks gracefully
+        try:
+            running_invite_tasks = await db.get_running_tasks()
+            for task in running_invite_tasks:
+                logger.info(f"Gracefully stopping invite task {task.id}...")
+                try:
+                    await inviter_worker.stop_invite_task(task.id)
+                    await db.update_invite_task(task.id, status='paused')
+                    logger.info(f"Invite task {task.id} paused for graceful shutdown")
+                except Exception as e:
+                    logger.error(f"Error stopping invite task {task.id}: {e}")
+        except Exception as e:
+            logger.error(f"Error during invite tasks shutdown: {e}")
+        
+        # Stop all running parse tasks gracefully
+        try:
+            running_parse_tasks = await db.get_running_parse_tasks()
+            for task in running_parse_tasks:
+                logger.info(f"Gracefully stopping parse task {task.id}...")
+                try:
+                    await parser_worker.stop_parse_task(task.id)
+                    await db.update_parse_task(task.id, status='paused')
+                    logger.info(f"Parse task {task.id} paused for graceful shutdown")
+                except Exception as e:
+                    logger.error(f"Error stopping parse task {task.id}: {e}")
+        except Exception as e:
+            logger.error(f"Error during parse tasks shutdown: {e}")
+        
+        # Stop all running post parse tasks gracefully
+        try:
+            running_post_parse_tasks = await db.get_running_post_parse_tasks()
+            for task in running_post_parse_tasks:
+                logger.info(f"Gracefully stopping post parse task {task.id}...")
+                try:
+                    await post_forwarder.stop_post_parse_task(task.id)
+                    logger.info(f"Post parse task {task.id} paused for graceful shutdown")
+                except Exception as e:
+                    logger.error(f"Error stopping post parse task {task.id}: {e}")
+        except Exception as e:
+            logger.error(f"Error during post parse tasks shutdown: {e}")
+        
+        # Stop all running post monitoring tasks gracefully
+        try:
+            running_post_monitor_tasks = await db.get_running_post_monitoring_tasks()
+            for task in running_post_monitor_tasks:
+                logger.info(f"Gracefully stopping post monitoring task {task.id}...")
+                try:
+                    await post_forwarder.stop_post_monitoring_task(task.id)
+                    logger.info(f"Post monitoring task {task.id} paused for graceful shutdown")
+                except Exception as e:
+                    logger.error(f"Error stopping post monitoring task {task.id}: {e}")
+        except Exception as e:
+            logger.error(f"Error during post monitoring tasks shutdown: {e}")
+        
+        await asyncio.sleep(1)
+        await session_manager.stop_all()
+        await db.close()
+        logger.info("Сервис Inviter Parser остановлен")
+    except asyncio.CancelledError:
+        logger.info("Остановка по Ctrl+C — завершение прервано")
+        raise
 
 
 app = FastAPI(
@@ -302,6 +342,131 @@ class CreateParseTaskRequest(BaseModel):
     delay_every_requests: int = 1
     rotate_every_requests: int = 0
     save_every_users: int = 0
+
+
+class UpdateParseTaskRequest(BaseModel):
+    """Request model for updating parse task settings."""
+    delay_seconds: Optional[int] = None
+    limit: Optional[int] = None
+    save_every: Optional[int] = None
+    rotate_sessions: Optional[bool] = None
+    rotate_every: Optional[int] = None
+    use_proxy: Optional[bool] = None
+    available_sessions: Optional[List[str]] = None
+    filter_admins: Optional[bool] = None
+    filter_inactive: Optional[bool] = None
+    inactive_threshold_days: Optional[int] = None
+    parse_mode: Optional[str] = None
+    keyword_filter: Optional[List[str]] = None
+    exclude_keywords: Optional[List[str]] = None
+    messages_limit: Optional[int] = None
+    delay_every_requests: Optional[int] = None
+    rotate_every_requests: Optional[int] = None
+    save_every_users: Optional[int] = None
+
+
+class CreatePostParseTaskRequest(BaseModel):
+    """Request model for creating post parse tasks (for forwarding posts between channels/groups)."""
+    user_id: int
+    source_id: int
+    source_title: str
+    source_username: Optional[str] = None
+    source_type: str = "channel"  # "channel" or "group"
+    target_id: int
+    target_title: str
+    target_username: Optional[str] = None
+    target_type: str = "channel"
+    session_alias: str
+    limit: Optional[int] = None
+    delay_seconds: int = 2
+    delay_every: int = 1
+    rotate_sessions: bool = False
+    rotate_every: int = 0
+    use_proxy: bool = True
+    available_sessions: List[str] = []
+    filter_contacts: bool = False
+    remove_contacts: bool = False
+    skip_on_contacts: bool = False  # Skip posts with contacts entirely
+    parse_direction: str = "backward"  # backward or forward
+    media_filter: str = "all"  # all, media_only, text_only
+    # Native forwarding settings
+    use_native_forward: bool = False
+    check_content_if_native: bool = True
+    forward_show_source: bool = True
+    keywords_whitelist: List[str] = []
+    keywords_blacklist: List[str] = []
+
+
+class UpdatePostParseTaskRequest(BaseModel):
+    """Request model for updating post parse task settings."""
+    delay_seconds: Optional[int] = None
+    delay_every: Optional[int] = None
+    limit: Optional[int] = None
+    rotate_sessions: Optional[bool] = None
+    rotate_every: Optional[int] = None
+    use_proxy: Optional[bool] = None
+    available_sessions: Optional[List[str]] = None
+    filter_contacts: Optional[bool] = None
+    remove_contacts: Optional[bool] = None
+    skip_on_contacts: Optional[bool] = None
+    parse_direction: Optional[str] = None
+    media_filter: Optional[str] = None
+    # Native forwarding settings
+    use_native_forward: Optional[bool] = None
+    check_content_if_native: Optional[bool] = None
+    forward_show_source: Optional[bool] = None
+    keywords_whitelist: Optional[List[str]] = None
+    keywords_blacklist: Optional[List[str]] = None
+
+
+class CreatePostMonitoringTaskRequest(BaseModel):
+    """Request model for creating post monitoring tasks (real-time post forwarding)."""
+    user_id: int
+    source_id: int
+    source_title: str
+    source_username: Optional[str] = None
+    source_type: str = "channel"  # "channel" or "group"
+    target_id: int
+    target_title: str
+    target_username: Optional[str] = None
+    target_type: str = "channel"
+    session_alias: str
+    limit: Optional[int] = None  # 0 = unlimited
+    delay_seconds: int = 0
+    rotate_sessions: bool = False
+    rotate_every: int = 0
+    use_proxy: bool = True
+    available_sessions: List[str] = []
+    filter_contacts: bool = False
+    remove_contacts: bool = False
+    skip_on_contacts: bool = False
+    # Native forwarding settings
+    use_native_forward: bool = False
+    check_content_if_native: bool = True
+    forward_show_source: bool = True
+    media_filter: str = "all"
+    keywords_whitelist: List[str] = []
+    keywords_blacklist: List[str] = []
+
+
+class UpdatePostMonitoringTaskRequest(BaseModel):
+    """Request model for updating post monitoring task settings."""
+    delay_seconds: Optional[int] = None
+    limit: Optional[int] = None
+    rotate_sessions: Optional[bool] = None
+    rotate_every: Optional[int] = None
+    use_proxy: Optional[bool] = None
+    available_sessions: Optional[List[str]] = None
+    filter_contacts: Optional[bool] = None
+    remove_contacts: Optional[bool] = None
+    skip_on_contacts: Optional[bool] = None
+    # Native forwarding settings
+    use_native_forward: Optional[bool] = None
+    check_content_if_native: Optional[bool] = None
+    forward_show_source: Optional[bool] = None
+    media_filter: Optional[str] = None
+    keywords_whitelist: Optional[List[str]] = None
+    keywords_blacklist: Optional[List[str]] = None
 
 
 # ============== Session Endpoints ==============
@@ -749,6 +914,37 @@ async def get_parse_task(task_id: int):
     }
 
 
+@app.patch("/parse_tasks/{task_id}")
+async def update_parse_task(task_id: int, request: UpdateParseTaskRequest):
+    """Update parse task settings."""
+    updates = {}
+    for field in ['delay_seconds', 'limit', 'save_every', 'rotate_sessions', 'rotate_every',
+                  'use_proxy', 'available_sessions', 'filter_admins', 'filter_inactive',
+                  'inactive_threshold_days', 'parse_mode', 'keyword_filter', 'exclude_keywords',
+                  'messages_limit', 'delay_every_requests', 'rotate_every_requests', 'save_every_users']:
+        value = getattr(request, field, None)
+        if value is not None:
+            if field == 'limit':
+                updates['parse_limit'] = value
+            elif field == 'parse_mode' and getattr(request, 'source_type', None) == 'channel':
+                 # Ignore parse_mode update if source is channel (it's fixed)
+                 # But request doesn't have source_type... 
+                 # Actually parse_mode is part of request, so we just pass it.
+                 pass
+            
+            updates[field] = value
+            
+            # Special handling for DB field name mapping if needed
+            if field == 'limit':
+                updates['parse_limit'] = value
+                del updates['limit']
+
+    if updates:
+        await db.update_parse_task(task_id, **updates)
+    
+    return {"success": True}
+
+
 @app.get("/parse_tasks/user/{user_id}")
 async def get_user_parse_tasks(user_id: int, status: Optional[str] = None):
     """Get all parse tasks for a user."""
@@ -811,6 +1007,368 @@ async def delete_parse_task(task_id: int):
         await db.update_parse_task(task_id, status='paused')
     
     await db.delete_parse_task(task_id)
+    return {"success": True}
+
+
+# ============== Post Parse Task Endpoints ==============
+
+@app.post("/post_parse_tasks")
+async def create_post_parse_task(request: CreatePostParseTaskRequest):
+    """Create a new post parse task."""
+    from models import PostParseTask
+    
+    task = PostParseTask(
+        id=0,
+        user_id=request.user_id,
+        source_id=request.source_id,
+        source_title=request.source_title,
+        source_username=request.source_username,
+        source_type=request.source_type,
+        target_id=request.target_id,
+        target_title=request.target_title,
+        target_username=request.target_username,
+        target_type=request.target_type,
+        session_alias=request.session_alias,
+        limit=request.limit,
+        delay_seconds=request.delay_seconds,
+        delay_every=request.delay_every,
+        rotate_sessions=request.rotate_sessions,
+        rotate_every=request.rotate_every,
+        use_proxy=request.use_proxy,
+        available_sessions=request.available_sessions,
+        filter_contacts=request.filter_contacts,
+        remove_contacts=request.remove_contacts,
+        skip_on_contacts=request.skip_on_contacts,
+        parse_direction=request.parse_direction,
+        media_filter=request.media_filter,
+        use_native_forward=request.use_native_forward,
+        check_content_if_native=request.check_content_if_native,
+        forward_show_source=request.forward_show_source,
+        keywords_whitelist=getattr(request, 'keywords_whitelist', []) or [],
+        keywords_blacklist=getattr(request, 'keywords_blacklist', []) or []
+    )
+    task_id = await db.create_post_parse_task(task)
+    return {"success": True, "task_id": task_id}
+
+
+@app.get("/post_parse_tasks/{task_id}")
+async def get_post_parse_task(task_id: int):
+    """Get post parse task details."""
+    task = await db.get_post_parse_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return {
+        "success": True,
+        "task": {
+            "id": task.id,
+            "user_id": task.user_id,
+            "source_id": task.source_id,
+            "source_title": task.source_title,
+            "source_username": task.source_username,
+            "source_type": task.source_type,
+            "target_id": task.target_id,
+            "target_title": task.target_title,
+            "target_username": task.target_username,
+            "target_type": task.target_type,
+            "session": task.session_alias,
+            "status": task.status,
+            "forwarded_count": task.forwarded_count,
+            "limit": task.limit,
+            "delay_seconds": task.delay_seconds,
+            "delay_every": task.delay_every,
+            "rotate_sessions": task.rotate_sessions,
+            "rotate_every": task.rotate_every,
+            "use_proxy": task.use_proxy,
+            "available_sessions": task.available_sessions,
+            "filter_contacts": task.filter_contacts,
+            "remove_contacts": task.remove_contacts,
+            "parse_direction": task.parse_direction,
+            "media_filter": task.media_filter,
+            "media_filter": task.media_filter,
+            "keywords_whitelist": getattr(task, 'keywords_whitelist', []) or [],
+            "keywords_blacklist": getattr(task, 'keywords_blacklist', []) or [],
+            "last_message_id": task.last_message_id,
+            "created_at": task.created_at,
+            "error_message": task.error_message
+        }
+    }
+
+
+@app.get("/post_parse_tasks/user/{user_id}")
+async def get_user_post_parse_tasks(user_id: int, status: Optional[str] = None):
+    """Get all post parse tasks for a user."""
+    tasks = await db.get_user_post_parse_tasks(user_id, status)
+    return {
+        "success": True,
+        "tasks": [
+            {
+                "id": t.id,
+                "source_title": t.source_title,
+                "target_title": t.target_title,
+                "session": t.session_alias,
+                "status": t.status,
+                "forwarded_count": t.forwarded_count,
+                "limit": t.limit,
+                "rotate_sessions": t.rotate_sessions,
+                "use_proxy": t.use_proxy,
+                "filter_contacts": t.filter_contacts,
+                "created_at": t.created_at,
+                "error_message": t.error_message
+            }
+            for t in tasks
+        ]
+    }
+
+
+@app.patch("/post_parse_tasks/{task_id}")
+async def update_post_parse_task(task_id: int, request: UpdatePostParseTaskRequest):
+    """Update post parse task settings."""
+    updates = {}
+    for field in ['delay_seconds', 'delay_every', 'limit', 'rotate_sessions', 'rotate_every',
+                  'use_proxy', 'available_sessions', 'filter_contacts', 'remove_contacts',
+                  'skip_on_contacts', 'parse_direction', 'media_filter', 'use_native_forward',
+                  'check_content_if_native', 'forward_show_source', 'keywords_whitelist', 'keywords_blacklist']:
+        value = getattr(request, field, None)
+        if value is not None:
+            if field == 'limit':
+                updates['post_limit'] = value
+            else:
+                updates[field] = value
+    
+    if updates:
+        await db.update_post_parse_task(task_id, **updates)
+    
+    return {"success": True}
+
+
+@app.post("/post_parse_tasks/{task_id}/start")
+async def start_post_parse_task(task_id: int):
+    """Start a post parse task."""
+    task = await db.get_post_parse_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if post_forwarder:
+        success = await post_forwarder.start_post_parse_task(task_id)
+        if success:
+            return {"success": True, "message": "Post parse task started"}
+        else:
+            return {"success": False, "error": "Task already running or failed to start"}
+    else:
+        await db.update_post_parse_task(task_id, status='running')
+        return {"success": True, "message": "Post parse task started (worker not available)"}
+
+
+@app.post("/post_parse_tasks/{task_id}/stop")
+async def stop_post_parse_task(task_id: int):
+    """Stop a post parse task."""
+    task = await db.get_post_parse_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if post_forwarder:
+        success = await post_forwarder.stop_post_parse_task(task_id)
+        if success:
+            return {"success": True, "message": "Post parse task stopped"}
+        else:
+            return {"success": False, "error": "Task not running or failed to stop"}
+    else:
+        await db.update_post_parse_task(task_id, status='paused')
+        return {"success": True, "message": "Post parse task stopped"}
+
+
+@app.delete("/post_parse_tasks/{task_id}")
+async def delete_post_parse_task(task_id: int):
+    """Delete a post parse task."""
+    task = await db.get_post_parse_task(task_id)
+    if task and task.status == 'running':
+        if post_forwarder:
+            await post_forwarder.stop_post_parse_task(task_id)
+        else:
+            await db.update_post_parse_task(task_id, status='paused')
+    
+    await db.delete_post_parse_task(task_id)
+    return {"success": True}
+
+
+# ============== Post Monitoring Task Endpoints ==============
+
+@app.post("/post_monitoring_tasks")
+async def create_post_monitoring_task(request: CreatePostMonitoringTaskRequest):
+    """Create a new post monitoring task."""
+    from models import PostMonitoringTask
+    
+    task = PostMonitoringTask(
+        id=0,
+        user_id=request.user_id,
+        source_id=request.source_id,
+        source_title=request.source_title,
+        source_username=request.source_username,
+        source_type=request.source_type,
+        target_id=request.target_id,
+        target_title=request.target_title,
+        target_username=request.target_username,
+        target_type=request.target_type,
+        session_alias=request.session_alias,
+        limit=request.limit,
+        delay_seconds=request.delay_seconds,
+        rotate_sessions=request.rotate_sessions,
+        rotate_every=request.rotate_every,
+        use_proxy=request.use_proxy,
+        available_sessions=request.available_sessions,
+        filter_contacts=request.filter_contacts,
+        remove_contacts=request.remove_contacts,
+        skip_on_contacts=request.skip_on_contacts,
+        use_native_forward=request.use_native_forward,
+        check_content_if_native=request.check_content_if_native,
+        forward_show_source=request.forward_show_source,
+        media_filter=getattr(request, 'media_filter', 'all'),
+        keywords_whitelist=getattr(request, 'keywords_whitelist', []) or [],
+        keywords_blacklist=getattr(request, 'keywords_blacklist', []) or []
+    )
+    task_id = await db.create_post_monitoring_task(task)
+    return {"success": True, "task_id": task_id}
+
+
+@app.get("/post_monitoring_tasks/{task_id}")
+async def get_post_monitoring_task(task_id: int):
+    """Get post monitoring task details."""
+    task = await db.get_post_monitoring_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return {
+        "success": True,
+        "task": {
+            "id": task.id,
+            "user_id": task.user_id,
+            "source_id": task.source_id,
+            "source_title": task.source_title,
+            "source_username": task.source_username,
+            "source_type": task.source_type,
+            "target_id": task.target_id,
+            "target_title": task.target_title,
+            "target_username": task.target_username,
+            "target_type": task.target_type,
+            "session": task.session_alias,
+            "status": task.status,
+            "forwarded_count": task.forwarded_count,
+            "limit": task.limit,
+            "delay_seconds": task.delay_seconds,
+            "rotate_sessions": task.rotate_sessions,
+            "rotate_every": task.rotate_every,
+            "use_proxy": task.use_proxy,
+            "available_sessions": task.available_sessions,
+            "filter_contacts": task.filter_contacts,
+            "remove_contacts": task.remove_contacts,
+            "skip_on_contacts": task.skip_on_contacts,
+            "use_native_forward": task.use_native_forward,
+            "check_content_if_native": task.check_content_if_native,
+            "forward_show_source": task.forward_show_source,
+            "media_filter": getattr(task, 'media_filter', 'all'),
+            "keywords_whitelist": getattr(task, 'keywords_whitelist', []) or [],
+            "keywords_blacklist": getattr(task, 'keywords_blacklist', []) or [],
+            "created_at": task.created_at,
+            "error_message": task.error_message
+        }
+    }
+
+
+@app.get("/post_monitoring_tasks/user/{user_id}")
+async def get_user_post_monitoring_tasks(user_id: int, status: Optional[str] = None):
+    """Get all post monitoring tasks for a user."""
+    tasks = await db.get_user_post_monitoring_tasks(user_id, status)
+    return {
+        "success": True,
+        "tasks": [
+            {
+                "id": t.id,
+                "source_title": t.source_title,
+                "target_title": t.target_title,
+                "session": t.session_alias,
+                "status": t.status,
+                "forwarded_count": t.forwarded_count,
+                "limit": t.limit,
+                "rotate_sessions": t.rotate_sessions,
+                "use_proxy": t.use_proxy,
+                "filter_contacts": t.filter_contacts,
+                "created_at": t.created_at,
+                "error_message": t.error_message
+            }
+            for t in tasks
+        ]
+    }
+
+
+@app.patch("/post_monitoring_tasks/{task_id}")
+async def update_post_monitoring_task(task_id: int, request: UpdatePostMonitoringTaskRequest):
+    """Update post monitoring task settings."""
+    updates = {}
+    for field in ['delay_seconds', 'limit', 'rotate_sessions', 'rotate_every',
+                  'use_proxy', 'available_sessions', 'filter_contacts', 'remove_contacts',
+                  'skip_on_contacts', 'use_native_forward', 'check_content_if_native',
+                  'forward_show_source', 'media_filter', 'keywords_whitelist', 'keywords_blacklist']:
+        value = getattr(request, field, None)
+        if value is not None:
+            if field == 'limit':
+                updates['post_limit'] = value
+            else:
+                updates[field] = value
+    
+    if updates:
+        await db.update_post_monitoring_task(task_id, **updates)
+    
+    return {"success": True}
+
+
+@app.post("/post_monitoring_tasks/{task_id}/start")
+async def start_post_monitoring_task(task_id: int):
+    """Start a post monitoring task."""
+    task = await db.get_post_monitoring_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if post_forwarder:
+        success = await post_forwarder.start_post_monitoring_task(task_id)
+        if success:
+            return {"success": True, "message": "Post monitoring task started"}
+        else:
+            return {"success": False, "error": "Task already running or failed to start"}
+    else:
+        await db.update_post_monitoring_task(task_id, status='running')
+        return {"success": True, "message": "Post monitoring task started (worker not available)"}
+
+
+@app.post("/post_monitoring_tasks/{task_id}/stop")
+async def stop_post_monitoring_task(task_id: int):
+    """Stop a post monitoring task."""
+    task = await db.get_post_monitoring_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if post_forwarder:
+        success = await post_forwarder.stop_post_monitoring_task(task_id)
+        if success:
+            return {"success": True, "message": "Post monitoring task stopped"}
+        else:
+            return {"success": False, "error": "Task not running or failed to stop"}
+    else:
+        await db.update_post_monitoring_task(task_id, status='paused')
+        return {"success": True, "message": "Post monitoring task stopped"}
+
+
+@app.delete("/post_monitoring_tasks/{task_id}")
+async def delete_post_monitoring_task(task_id: int):
+    """Delete a post monitoring task."""
+    task = await db.get_post_monitoring_task(task_id)
+    if task and task.status == 'running':
+        if post_forwarder:
+            await post_forwarder.stop_post_monitoring_task(task_id)
+        else:
+            await db.update_post_monitoring_task(task_id, status='paused')
+    
+    await db.delete_post_monitoring_task(task_id)
     return {"success": True}
 
 

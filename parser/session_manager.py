@@ -146,6 +146,15 @@ class SessionManager:
         """Ensure session directory exists."""
         os.makedirs(self.session_dir, exist_ok=True)
     
+    async def release_client(self, alias: str):
+        """
+        Release a client. Currently does nothing as clients are kept in memory.
+        Can be extended for connection pooling or session management.
+        """
+        # We could potentially stop the client here if we wanted to save resources,
+        # but for now we keep them in self.clients for faster reuse.
+        pass
+    
     async def import_sessions_from_files(self):
         """Import existing session files from directory."""
         await self.db.import_existing_sessions(self.session_dir)
@@ -356,13 +365,57 @@ class SessionManager:
         
         client = self.clients.get(alias)
         if client and not client.is_connected:
+            proxy_info = await self.get_proxy_info(alias, use_proxy)
+            proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
+            
             try:
-                await client.start()
-                proxy_info = await self.get_proxy_info(alias, use_proxy)
-                proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
-                logger.info(f"Запущена сессия: {alias}{proxy_str}")
+                # Apply timeout for connection - especially important for bad proxies
+                # Pyrogram can hang indefinitely if proxy is unreachable
+                connection_timeout = 30  # 30 seconds timeout
+                
+                try:
+                    await asyncio.wait_for(client.start(), timeout=connection_timeout)
+                    logger.info(f"Запущена сессия: {alias}{proxy_str}")
+                except asyncio.TimeoutError:
+                    # Connection timeout - likely bad proxy
+                    error_msg = f"Таймаут подключения ({connection_timeout}с) для сессии {alias}{proxy_str}. Прокси недоступен или неверен."
+                    logger.error(error_msg)
+                    # Clean up failed client
+                    if alias in self.clients:
+                        try:
+                            if self.clients[alias].is_connected:
+                                await self.clients[alias].stop()
+                        except:
+                            pass
+                        del self.clients[alias]
+                    return None
+                    
+            except OSError as e:
+                # Network/proxy connection error
+                error_msg = f"Ошибка сети при подключении сессии {alias}{proxy_str}: {e}"
+                logger.error(error_msg)
+                if alias in self.clients:
+                    del self.clients[alias]
+                return None
+            except ConnectionError as e:
+                # Proxy connection refused
+                error_msg = f"Ошибка подключения к прокси для сессии {alias}{proxy_str}: {e}"
+                logger.error(error_msg)
+                if alias in self.clients:
+                    del self.clients[alias]
+                return None
             except Exception as e:
-                logger.error(f"Не удалось запустить сессию {alias}: {e}")
+                error_str = str(e).lower()
+                # Check for common proxy errors in exception message
+                if "proxy" in error_str or "socks" in error_str or "connect" in error_str or "network" in error_str:
+                    error_msg = f"Не удалось подключиться через прокси для сессии {alias}{proxy_str}: {e}"
+                    logger.error(error_msg)
+                else:
+                    error_msg = f"Не удалось запустить сессию {alias}{proxy_str}: {e}"
+                    logger.error(error_msg)
+                    
+                if alias in self.clients:
+                    del self.clients[alias]
                 return None
         
         return client

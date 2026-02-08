@@ -216,7 +216,12 @@ class ParserWorker:
             # Get client
             client = await self.session_manager.get_client(current_session, use_proxy=task.use_proxy)
             if not client:
-                raise Exception(f"Session {current_session} not available")
+                # Detailed error message with proxy info
+                if proxy_info:
+                    error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{current_session}' через прокси {proxy_info}. Прокси недоступен, неверен или заблокирован."
+                else:
+                    error_msg = f"❌ Сессия '{current_session}' недоступна"
+                raise Exception(error_msg)
             
             logger.info(f"✅ Задача {task_id} - клиент получен для сессии {current_session}{proxy_str}")
             
@@ -613,7 +618,11 @@ class ParserWorker:
             # Get client
             client = await self.session_manager.get_client(current_session, use_proxy=task.use_proxy)
             if not client:
-                raise Exception(f"Session {current_session} not available")
+                if proxy_info:
+                    error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{current_session}' через прокси {proxy_info}. Прокси недоступен или неверен."
+                else:
+                    error_msg = f"❌ Сессия '{current_session}' недоступна"
+                raise Exception(error_msg)
             
             logger.info(f"✅ Задача {task_id} - клиент получен для сессии {current_session}{proxy_str}")
             
@@ -968,7 +977,11 @@ class ParserWorker:
             # Get client
             client = await self.session_manager.get_client(current_session, use_proxy=task.use_proxy)
             if not client:
-                raise Exception(f"Session {current_session} not available")
+                if proxy_info:
+                    error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{current_session}' через прокси {proxy_info}. Прокси недоступен или неверен."
+                else:
+                    error_msg = f"❌ Сессия '{current_session}' недоступна"
+                raise Exception(error_msg)
             
             logger.info(f"✅ Задача {task_id} - клиент получен для сессии {current_session}{proxy_str}")
             

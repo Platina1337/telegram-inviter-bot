@@ -392,6 +392,10 @@ class APIClient:
         params = {"status": status} if status else {}
         return await self._make_request("GET", f"/parse_tasks/user/{user_id}", params=params)
     
+    async def update_parse_task(self, task_id: int, **kwargs) -> Dict[str, Any]:
+        """Update parse task settings."""
+        return await self._make_request("PATCH", f"/parse_tasks/{task_id}", json=kwargs)
+    
     async def start_parse_task(self, task_id: int) -> Dict[str, Any]:
         """Start a parse task."""
         return await self._make_request("POST", f"/parse_tasks/{task_id}/start")
@@ -403,6 +407,146 @@ class APIClient:
     async def delete_parse_task(self, task_id: int) -> Dict[str, Any]:
         """Delete a parse task."""
         return await self._make_request("DELETE", f"/parse_tasks/{task_id}")
+    
+    # ============== Post Parse Tasks ==============
+    
+    async def create_post_parse_task(
+        self, user_id: int, source_id: int, source_title: str, source_username: str,
+        source_type: str, target_id: int, target_title: str, target_username: str,
+        target_type: str, session_alias: str, available_sessions: List[str],
+        limit: int = None, delay_seconds: int = 2, delay_every: int = 1,
+        rotate_sessions: bool = False, rotate_every: int = 0, use_proxy: bool = True,
+        filter_contacts: bool = False, remove_contacts: bool = False, skip_on_contacts: bool = False,
+        parse_direction: str = "backward", media_filter: str = "all",
+        # Native forwarding settings
+        use_native_forward: bool = False, check_content_if_native: bool = True, forward_show_source: bool = True,
+        keywords_whitelist: List[str] = None, keywords_blacklist: List[str] = None
+    ) -> Dict[str, Any]:
+        """Create a new post parse task."""
+        return await self._make_request("POST", "/post_parse_tasks", json={
+            "user_id": user_id,
+            "source_id": source_id,
+            "source_title": source_title,
+            "source_username": source_username,
+            "source_type": source_type,
+            "target_id": target_id,
+            "target_title": target_title,
+            "target_username": target_username,
+            "target_type": target_type,
+            "session_alias": session_alias,
+            "available_sessions": available_sessions,
+            "limit": limit,
+            "delay_seconds": delay_seconds,
+            "delay_every": delay_every,
+            "rotate_sessions": rotate_sessions,
+            "rotate_every": rotate_every,
+            "use_proxy": use_proxy,
+            "filter_contacts": filter_contacts,
+            "remove_contacts": remove_contacts,
+            "skip_on_contacts": skip_on_contacts,
+            "parse_direction": parse_direction,
+            "media_filter": media_filter,
+            "use_native_forward": use_native_forward,
+            "check_content_if_native": check_content_if_native,
+            "forward_show_source": forward_show_source,
+            "keywords_whitelist": keywords_whitelist,
+            "keywords_blacklist": keywords_blacklist
+        })
+    
+    async def get_post_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Get post parse task details."""
+        return await self._make_request("GET", f"/post_parse_tasks/{task_id}")
+    
+    async def get_user_post_parse_tasks(self, user_id: int, status: str = None) -> Dict[str, Any]:
+        """Get all post parse tasks for a user."""
+        params = {"status": status} if status else {}
+        return await self._make_request("GET", f"/post_parse_tasks/user/{user_id}", params=params)
+    
+    async def start_post_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Start a post parse task."""
+        return await self._make_request("POST", f"/post_parse_tasks/{task_id}/start")
+    
+    async def stop_post_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Stop a post parse task."""
+        return await self._make_request("POST", f"/post_parse_tasks/{task_id}/stop")
+    
+    async def delete_post_parse_task(self, task_id: int) -> Dict[str, Any]:
+        """Delete a post parse task."""
+        return await self._make_request("DELETE", f"/post_parse_tasks/{task_id}")
+    
+    async def update_post_parse_task(self, task_id: int, **kwargs) -> Dict[str, Any]:
+        """Update post parse task settings."""
+        return await self._make_request("PATCH", f"/post_parse_tasks/{task_id}", json=kwargs)
+    
+    # ============== Post Monitoring Tasks ==============
+    
+    async def create_post_monitoring_task(
+        self, user_id: int, source_id: int, source_title: str, source_username: str,
+        source_type: str, target_id: int, target_title: str, target_username: str,
+        target_type: str, session_alias: str, available_sessions: List[str],
+        limit: int = None, delay_seconds: int = 0,
+        rotate_sessions: bool = False, rotate_every: int = 0, use_proxy: bool = True,
+        filter_contacts: bool = False, remove_contacts: bool = False, skip_on_contacts: bool = False,
+        use_native_forward: bool = False, check_content_if_native: bool = True, forward_show_source: bool = True,
+        media_filter: str = "all", keywords_whitelist: List[str] = None, keywords_blacklist: List[str] = None
+    ) -> Dict[str, Any]:
+        """Create a new post monitoring task."""
+        if keywords_whitelist is None:
+            keywords_whitelist = []
+        if keywords_blacklist is None:
+            keywords_blacklist = []
+        return await self._make_request("POST", "/post_monitoring_tasks", json={
+            "user_id": user_id,
+            "source_id": source_id,
+            "source_title": source_title,
+            "source_username": source_username,
+            "source_type": source_type,
+            "target_id": target_id,
+            "target_title": target_title,
+            "target_username": target_username,
+            "target_type": target_type,
+            "session_alias": session_alias,
+            "available_sessions": available_sessions,
+            "limit": limit,
+            "delay_seconds": delay_seconds,
+            "rotate_sessions": rotate_sessions,
+            "rotate_every": rotate_every,
+            "use_proxy": use_proxy,
+            "filter_contacts": filter_contacts,
+            "remove_contacts": remove_contacts,
+            "skip_on_contacts": skip_on_contacts,
+            "use_native_forward": use_native_forward,
+            "check_content_if_native": check_content_if_native,
+            "forward_show_source": forward_show_source,
+            "media_filter": media_filter,
+            "keywords_whitelist": keywords_whitelist,
+            "keywords_blacklist": keywords_blacklist
+        })
+    
+    async def get_post_monitoring_task(self, task_id: int) -> Dict[str, Any]:
+        """Get post monitoring task details."""
+        return await self._make_request("GET", f"/post_monitoring_tasks/{task_id}")
+    
+    async def get_user_post_monitoring_tasks(self, user_id: int, status: str = None) -> Dict[str, Any]:
+        """Get all post monitoring tasks for a user."""
+        params = {"status": status} if status else {}
+        return await self._make_request("GET", f"/post_monitoring_tasks/user/{user_id}", params=params)
+    
+    async def start_post_monitoring_task(self, task_id: int) -> Dict[str, Any]:
+        """Start a post monitoring task."""
+        return await self._make_request("POST", f"/post_monitoring_tasks/{task_id}/start")
+    
+    async def stop_post_monitoring_task(self, task_id: int) -> Dict[str, Any]:
+        """Stop a post monitoring task."""
+        return await self._make_request("POST", f"/post_monitoring_tasks/{task_id}/stop")
+    
+    async def delete_post_monitoring_task(self, task_id: int) -> Dict[str, Any]:
+        """Delete a post monitoring task."""
+        return await self._make_request("DELETE", f"/post_monitoring_tasks/{task_id}")
+    
+    async def update_post_monitoring_task(self, task_id: int, **kwargs) -> Dict[str, Any]:
+        """Update post monitoring task settings."""
+        return await self._make_request("PATCH", f"/post_monitoring_tasks/{task_id}", json=kwargs)
     
     # ============== Health Check ==============
     

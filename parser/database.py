@@ -145,6 +145,71 @@ class Database:
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 error_message TEXT
             );
+            
+            CREATE TABLE IF NOT EXISTS post_parse_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                source_title TEXT,
+                source_username TEXT,
+                source_type TEXT DEFAULT 'channel',
+                target_id INTEGER NOT NULL,
+                target_title TEXT,
+                target_username TEXT,
+                target_type TEXT DEFAULT 'channel',
+                session_alias TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                forwarded_count INTEGER DEFAULT 0,
+                post_limit INTEGER,
+                delay_seconds INTEGER DEFAULT 2,
+                delay_every INTEGER DEFAULT 1,
+                rotate_sessions INTEGER DEFAULT 0,
+                rotate_every INTEGER DEFAULT 0,
+                available_sessions TEXT,
+                failed_sessions TEXT,
+                current_offset INTEGER DEFAULT 0,
+                use_proxy INTEGER DEFAULT 1,
+                filter_contacts INTEGER DEFAULT 0,
+                remove_contacts INTEGER DEFAULT 0,
+                parse_direction TEXT DEFAULT 'backward',
+                media_filter TEXT DEFAULT 'all',
+                last_message_id INTEGER,
+                last_action_time TEXT,
+                current_session TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                error_message TEXT
+            );
+            
+            CREATE TABLE IF NOT EXISTS post_monitoring_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                source_title TEXT,
+                source_username TEXT,
+                source_type TEXT DEFAULT 'channel',
+                target_id INTEGER NOT NULL,
+                target_title TEXT,
+                target_username TEXT,
+                target_type TEXT DEFAULT 'channel',
+                session_alias TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                forwarded_count INTEGER DEFAULT 0,
+                post_limit INTEGER,
+                delay_seconds INTEGER DEFAULT 0,
+                rotate_sessions INTEGER DEFAULT 0,
+                rotate_every INTEGER DEFAULT 0,
+                available_sessions TEXT,
+                failed_sessions TEXT,
+                use_proxy INTEGER DEFAULT 1,
+                filter_contacts INTEGER DEFAULT 0,
+                remove_contacts INTEGER DEFAULT 0,
+                last_action_time TEXT,
+                current_session TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                error_message TEXT
+            );
         """)
         
         # Migration: add delay_every to invite_tasks if missing
@@ -318,6 +383,84 @@ class Database:
         # Migration: add current_session to parse_tasks for rotation tracking
         try:
             await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN current_session TEXT")
+        except:
+            pass
+
+        # Migration: add skip_on_contacts to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN skip_on_contacts INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add skip_on_contacts to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN skip_on_contacts INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add use_native_forward to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN use_native_forward INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add check_content_if_native to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN check_content_if_native INTEGER DEFAULT 1")
+        except:
+            pass
+
+        # Migration: add forward_show_source to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN forward_show_source INTEGER DEFAULT 1")
+        except:
+            pass
+
+        # Migration: add use_native_forward to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN use_native_forward INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add check_content_if_native to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN check_content_if_native INTEGER DEFAULT 1")
+        except:
+            pass
+
+        # Migration: add forward_show_source to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN forward_show_source INTEGER DEFAULT 1")
+        except:
+            pass
+
+        # Migration: add keywords_whitelist to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN keywords_whitelist TEXT")
+        except:
+            pass
+
+        # Migration: add keywords_blacklist to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN keywords_blacklist TEXT")
+        except:
+            pass
+
+        # Migration: add media_filter to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN media_filter TEXT DEFAULT 'all'")
+        except:
+            pass
+
+        # Migration: add keywords_whitelist to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN keywords_whitelist TEXT")
+        except:
+            pass
+
+        # Migration: add keywords_blacklist to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN keywords_blacklist TEXT")
         except:
             pass
 
@@ -777,7 +920,9 @@ class Database:
             'save_every', 'rotate_sessions', 'rotate_every', 'available_sessions',
             'failed_sessions', 'current_offset', 'use_proxy',
             'session_alias', 'error_message', 'messages_limit', 'delay_every_requests',
-            'rotate_every_requests', 'save_every_users', 'messages_offset'
+            'rotate_every_requests', 'save_every_users', 'messages_offset',
+            'filter_admins', 'filter_inactive', 'inactive_threshold_days',
+            'parse_mode', 'keyword_filter', 'exclude_keywords'
         }
         
         updates = []
@@ -785,9 +930,9 @@ class Database:
         
         for key, value in kwargs.items():
             if key in allowed_fields:
-                if key in ['rotate_sessions', 'use_proxy']:
+                if key in ['rotate_sessions', 'use_proxy', 'filter_admins', 'filter_inactive']:
                     value = 1 if value else 0
-                elif key in ['available_sessions', 'failed_sessions']:
+                elif key in ['available_sessions', 'failed_sessions', 'keyword_filter', 'exclude_keywords']:
                     value = ','.join(value) if isinstance(value, list) else value
                 
                 updates.append(f"{key} = ?")
@@ -886,5 +1031,272 @@ class Database:
             messages_offset=row['messages_offset'] if 'messages_offset' in row.keys() else 0,
             last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
             current_session=row['current_session'] if 'current_session' in row.keys() else None
+        )
+
+    # ============== Post Parse Tasks ==============
+    
+    async def create_post_parse_task(self, task: 'PostParseTask') -> int:
+        """Create a new post parse task."""
+        from shared.models import PostParseTask
+        
+        cursor = await self.conn.execute("""
+            INSERT INTO post_parse_tasks (
+                user_id, source_id, source_title, source_username, source_type,
+                target_id, target_title, target_username, target_type,
+                session_alias, status, forwarded_count, post_limit, delay_seconds, delay_every,
+                rotate_sessions, rotate_every, available_sessions, failed_sessions,
+                current_offset, use_proxy, filter_contacts, remove_contacts, skip_on_contacts,
+                parse_direction, media_filter, last_message_id, error_message,
+                use_native_forward, check_content_if_native, forward_show_source,
+                keywords_whitelist, keywords_blacklist
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            task.user_id, task.source_id, task.source_title, task.source_username, task.source_type,
+            task.target_id, task.target_title, task.target_username, task.target_type,
+            task.session_alias, task.status, task.forwarded_count, task.limit, task.delay_seconds, task.delay_every,
+            1 if task.rotate_sessions else 0, task.rotate_every, ','.join(task.available_sessions),
+            ','.join(task.failed_sessions), task.current_offset,
+            1 if task.use_proxy else 0, 1 if task.filter_contacts else 0, 1 if task.remove_contacts else 0,
+            1 if task.skip_on_contacts else 0,
+            task.parse_direction, task.media_filter, task.last_message_id, task.error_message,
+            1 if task.use_native_forward else 0, 1 if task.check_content_if_native else 0, 1 if task.forward_show_source else 0,
+            ','.join(task.keywords_whitelist) if task.keywords_whitelist else '',
+            ','.join(task.keywords_blacklist) if task.keywords_blacklist else ''
+        ))
+        await self.conn.commit()
+        return cursor.lastrowid
+    
+    async def get_post_parse_task(self, task_id: int) -> Optional['PostParseTask']:
+        """Get post parse task by ID."""
+        cursor = await self.conn.execute("""
+            SELECT * FROM post_parse_tasks WHERE id = ?
+        """, (task_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_post_parse_task(row)
+    
+    async def update_post_parse_task(self, task_id: int, **kwargs):
+        """Update post parse task fields."""
+        if self.conn is None:
+            return
+        allowed_fields = {
+            'status', 'forwarded_count', 'post_limit', 'delay_seconds', 'delay_every',
+            'rotate_sessions', 'rotate_every', 'available_sessions', 'failed_sessions',
+            'current_offset', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts',
+            'parse_direction', 'media_filter', 'last_message_id', 'session_alias',
+            'error_message', 'last_action_time', 'current_session',
+            'use_native_forward', 'check_content_if_native', 'forward_show_source',
+            'keywords_whitelist', 'keywords_blacklist'
+        }
+        updates = []
+        values = []
+        for key, value in kwargs.items():
+            if key in allowed_fields:
+                if key in ['rotate_sessions', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts',
+                           'use_native_forward', 'check_content_if_native', 'forward_show_source']:
+                    value = 1 if value else 0
+                elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist']:
+                    value = ','.join(value) if isinstance(value, list) else value
+                updates.append(f"{key} = ?")
+                values.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(task_id)
+        query = f"UPDATE post_parse_tasks SET {', '.join(updates)} WHERE id = ?"
+        await self.conn.execute(query, values)
+        await self.conn.commit()
+    
+    async def delete_post_parse_task(self, task_id: int):
+        """Delete a post parse task."""
+        await self.conn.execute("DELETE FROM post_parse_tasks WHERE id = ?", (task_id,))
+        await self.conn.commit()
+    
+    async def get_user_post_parse_tasks(self, user_id: int, status: str = None) -> List['PostParseTask']:
+        """Get all post parse tasks for a user."""
+        if status:
+            cursor = await self.conn.execute(
+                "SELECT * FROM post_parse_tasks WHERE user_id = ? AND status = ? ORDER BY created_at DESC",
+                (user_id, status))
+        else:
+            cursor = await self.conn.execute(
+                "SELECT * FROM post_parse_tasks WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,))
+        rows = await cursor.fetchall()
+        return [self._row_to_post_parse_task(row) for row in rows]
+    
+    async def get_running_post_parse_tasks(self) -> List['PostParseTask']:
+        """Get all running post parse tasks."""
+        cursor = await self.conn.execute("SELECT * FROM post_parse_tasks WHERE status = 'running'")
+        rows = await cursor.fetchall()
+        return [self._row_to_post_parse_task(row) for row in rows]
+    
+    def _row_to_post_parse_task(self, row) -> 'PostParseTask':
+        """Convert database row to PostParseTask object."""
+        from shared.models import PostParseTask
+        available_sessions = row['available_sessions'].split(',') if row['available_sessions'] else []
+        failed_sessions = row['failed_sessions'].split(',') if row['failed_sessions'] else []
+        available_sessions = [s for s in available_sessions if s]
+        failed_sessions = [s for s in failed_sessions if s]
+        return PostParseTask(
+            id=row['id'], user_id=row['user_id'], source_id=row['source_id'],
+            source_title=row['source_title'] or '',
+            source_username=row['source_username'] if 'source_username' in row.keys() else None,
+            source_type=row['source_type'] if 'source_type' in row.keys() else 'channel',
+            target_id=row['target_id'], target_title=row['target_title'] or '',
+            target_username=row['target_username'] if 'target_username' in row.keys() else None,
+            target_type=row['target_type'] if 'target_type' in row.keys() else 'channel',
+            session_alias=row['session_alias'], status=row['status'],
+            forwarded_count=row['forwarded_count'], limit=row['post_limit'],
+            delay_seconds=row['delay_seconds'],
+            delay_every=row['delay_every'] if 'delay_every' in row.keys() else 1,
+            rotate_sessions=bool(row['rotate_sessions']), rotate_every=row['rotate_every'],
+            use_proxy=bool(row['use_proxy']), available_sessions=available_sessions,
+            failed_sessions=failed_sessions, current_offset=row['current_offset'],
+            created_at=row['created_at'], updated_at=row['updated_at'],
+            error_message=row['error_message'],
+            filter_contacts=bool(row['filter_contacts']) if 'filter_contacts' in row.keys() else False,
+            remove_contacts=bool(row['remove_contacts']) if 'remove_contacts' in row.keys() else False,
+            skip_on_contacts=bool(row['skip_on_contacts']) if 'skip_on_contacts' in row.keys() else False,
+            parse_direction=row['parse_direction'] if 'parse_direction' in row.keys() else 'backward',
+            media_filter=row['media_filter'] if 'media_filter' in row.keys() else 'all',
+            last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
+            current_session=row['current_session'] if 'current_session' in row.keys() else None,
+            last_message_id=row['last_message_id'] if 'last_message_id' in row.keys() else None,
+            use_native_forward=bool(row['use_native_forward']) if 'use_native_forward' in row.keys() else False,
+            check_content_if_native=bool(row['check_content_if_native']) if 'check_content_if_native' in row.keys() else True,
+            forward_show_source=bool(row['forward_show_source']) if 'forward_show_source' in row.keys() else True,
+            keywords_whitelist=row['keywords_whitelist'].split(',') if 'keywords_whitelist' in row.keys() and row['keywords_whitelist'] else [],
+            keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else []
+        )
+
+    # ============== Post Monitoring Tasks ==============
+    
+    async def create_post_monitoring_task(self, task: 'PostMonitoringTask') -> int:
+        """Create a new post monitoring task."""
+        from shared.models import PostMonitoringTask
+        cursor = await self.conn.execute("""
+            INSERT INTO post_monitoring_tasks (
+                user_id, source_id, source_title, source_username, source_type,
+                target_id, target_title, target_username, target_type,
+                session_alias, status, forwarded_count, post_limit, delay_seconds,
+                rotate_sessions, rotate_every, available_sessions, failed_sessions,
+                use_proxy, filter_contacts, remove_contacts, skip_on_contacts, error_message,
+                use_native_forward, check_content_if_native, forward_show_source,
+                media_filter, keywords_whitelist, keywords_blacklist
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            task.user_id, task.source_id, task.source_title, task.source_username, task.source_type,
+            task.target_id, task.target_title, task.target_username, task.target_type,
+            task.session_alias, task.status, task.forwarded_count, task.limit, task.delay_seconds,
+            1 if task.rotate_sessions else 0, task.rotate_every, ','.join(task.available_sessions),
+            ','.join(task.failed_sessions),
+            1 if task.use_proxy else 0, 1 if task.filter_contacts else 0, 1 if task.remove_contacts else 0,
+            1 if task.skip_on_contacts else 0,
+            task.error_message,
+            1 if task.use_native_forward else 0, 1 if task.check_content_if_native else 0, 1 if task.forward_show_source else 0,
+            task.media_filter,
+            ','.join(task.keywords_whitelist) if task.keywords_whitelist else '',
+            ','.join(task.keywords_blacklist) if task.keywords_blacklist else ''
+        ))
+        await self.conn.commit()
+        return cursor.lastrowid
+    
+    async def get_post_monitoring_task(self, task_id: int) -> Optional['PostMonitoringTask']:
+        """Get post monitoring task by ID."""
+        cursor = await self.conn.execute("SELECT * FROM post_monitoring_tasks WHERE id = ?", (task_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_post_monitoring_task(row)
+    
+    async def update_post_monitoring_task(self, task_id: int, **kwargs):
+        """Update post monitoring task fields."""
+        if self.conn is None:
+            return
+        allowed_fields = {
+            'status', 'forwarded_count', 'post_limit', 'delay_seconds',
+            'rotate_sessions', 'rotate_every', 'available_sessions', 'failed_sessions',
+            'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts', 'session_alias',
+            'error_message', 'last_action_time', 'current_session',
+            'use_native_forward', 'check_content_if_native', 'forward_show_source',
+            'media_filter', 'keywords_whitelist', 'keywords_blacklist'
+        }
+        updates = []
+        values = []
+        for key, value in kwargs.items():
+            if key in allowed_fields:
+                if key in ['rotate_sessions', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts', 'use_native_forward', 'check_content_if_native', 'forward_show_source']:
+                    value = 1 if value else 0
+                elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist']:
+                    value = ','.join(value) if isinstance(value, list) else value
+                updates.append(f"{key} = ?")
+                values.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(task_id)
+        query = f"UPDATE post_monitoring_tasks SET {', '.join(updates)} WHERE id = ?"
+        await self.conn.execute(query, values)
+        await self.conn.commit()
+    
+    async def delete_post_monitoring_task(self, task_id: int):
+        """Delete a post monitoring task."""
+        await self.conn.execute("DELETE FROM post_monitoring_tasks WHERE id = ?", (task_id,))
+        await self.conn.commit()
+    
+    async def get_user_post_monitoring_tasks(self, user_id: int, status: str = None) -> List['PostMonitoringTask']:
+        """Get all post monitoring tasks for a user."""
+        if status:
+            cursor = await self.conn.execute(
+                "SELECT * FROM post_monitoring_tasks WHERE user_id = ? AND status = ? ORDER BY created_at DESC",
+                (user_id, status))
+        else:
+            cursor = await self.conn.execute(
+                "SELECT * FROM post_monitoring_tasks WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,))
+        rows = await cursor.fetchall()
+        return [self._row_to_post_monitoring_task(row) for row in rows]
+    
+    async def get_running_post_monitoring_tasks(self) -> List['PostMonitoringTask']:
+        """Get all running post monitoring tasks."""
+        cursor = await self.conn.execute("SELECT * FROM post_monitoring_tasks WHERE status = 'running'")
+        rows = await cursor.fetchall()
+        return [self._row_to_post_monitoring_task(row) for row in rows]
+    
+    def _row_to_post_monitoring_task(self, row) -> 'PostMonitoringTask':
+        """Convert database row to PostMonitoringTask object."""
+        from shared.models import PostMonitoringTask
+        available_sessions = row['available_sessions'].split(',') if row['available_sessions'] else []
+        failed_sessions = row['failed_sessions'].split(',') if row['failed_sessions'] else []
+        available_sessions = [s for s in available_sessions if s]
+        failed_sessions = [s for s in failed_sessions if s]
+        return PostMonitoringTask(
+            id=row['id'], user_id=row['user_id'], source_id=row['source_id'],
+            source_title=row['source_title'] or '',
+            source_username=row['source_username'] if 'source_username' in row.keys() else None,
+            source_type=row['source_type'] if 'source_type' in row.keys() else 'channel',
+            target_id=row['target_id'], target_title=row['target_title'] or '',
+            target_username=row['target_username'] if 'target_username' in row.keys() else None,
+            target_type=row['target_type'] if 'target_type' in row.keys() else 'channel',
+            session_alias=row['session_alias'], status=row['status'],
+            forwarded_count=row['forwarded_count'], limit=row['post_limit'],
+            delay_seconds=row['delay_seconds'],
+            rotate_sessions=bool(row['rotate_sessions']), rotate_every=row['rotate_every'],
+            use_proxy=bool(row['use_proxy']), available_sessions=available_sessions,
+            failed_sessions=failed_sessions, created_at=row['created_at'],
+            updated_at=row['updated_at'], error_message=row['error_message'],
+            filter_contacts=bool(row['filter_contacts']) if 'filter_contacts' in row.keys() else False,
+            remove_contacts=bool(row['remove_contacts']) if 'remove_contacts' in row.keys() else False,
+            skip_on_contacts=bool(row['skip_on_contacts']) if 'skip_on_contacts' in row.keys() else False,
+            use_native_forward=bool(row['use_native_forward']) if 'use_native_forward' in row.keys() else False,
+            check_content_if_native=bool(row['check_content_if_native']) if 'check_content_if_native' in row.keys() else True,
+            forward_show_source=bool(row['forward_show_source']) if 'forward_show_source' in row.keys() else True,
+            last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
+            current_session=row['current_session'] if 'current_session' in row.keys() else None,
+            media_filter=row['media_filter'] if 'media_filter' in row.keys() else 'all',
+            keywords_whitelist=row['keywords_whitelist'].split(',') if 'keywords_whitelist' in row.keys() and row['keywords_whitelist'] else [],
+            keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else []
         )
 
