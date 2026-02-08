@@ -394,7 +394,10 @@ class CreatePostParseTaskRequest(BaseModel):
     check_content_if_native: bool = True
     forward_show_source: bool = True
     keywords_whitelist: List[str] = []
+    keywords_whitelist: List[str] = []
     keywords_blacklist: List[str] = []
+    add_signature: bool = False
+    signature_options: Optional[Dict[str, Any]] = None  # include_post, include_source, include_author, label_source, label_author
 
 
 class UpdatePostParseTaskRequest(BaseModel):
@@ -416,7 +419,10 @@ class UpdatePostParseTaskRequest(BaseModel):
     check_content_if_native: Optional[bool] = None
     forward_show_source: Optional[bool] = None
     keywords_whitelist: Optional[List[str]] = None
+    keywords_whitelist: Optional[List[str]] = None
     keywords_blacklist: Optional[List[str]] = None
+    add_signature: Optional[bool] = None
+    signature_options: Optional[Dict[str, Any]] = None
 
 
 class CreatePostMonitoringTaskRequest(BaseModel):
@@ -446,7 +452,10 @@ class CreatePostMonitoringTaskRequest(BaseModel):
     forward_show_source: bool = True
     media_filter: str = "all"
     keywords_whitelist: List[str] = []
+    keywords_whitelist: List[str] = []
     keywords_blacklist: List[str] = []
+    add_signature: bool = False
+    signature_options: Optional[Dict[str, Any]] = None
 
 
 class UpdatePostMonitoringTaskRequest(BaseModel):
@@ -466,7 +475,10 @@ class UpdatePostMonitoringTaskRequest(BaseModel):
     forward_show_source: Optional[bool] = None
     media_filter: Optional[str] = None
     keywords_whitelist: Optional[List[str]] = None
+    keywords_whitelist: Optional[List[str]] = None
     keywords_blacklist: Optional[List[str]] = None
+    add_signature: Optional[bool] = None
+    signature_options: Optional[Dict[str, Any]] = None
 
 
 # ============== Session Endpoints ==============
@@ -789,6 +801,15 @@ async def update_task(task_id: int, request: UpdateTaskRequest):
     
     if updates:
         await db.update_invite_task(task_id, **updates)
+        # Если сменили список сессий — текущая активная может быть удалена: переключаем на первую из нового списка
+        if request.available_sessions is not None and request.available_sessions:
+            task = await db.get_invite_task(task_id)
+            if task and task.session_alias not in task.available_sessions:
+                await db.update_invite_task(
+                    task_id,
+                    session_alias=task.available_sessions[0],
+                    current_session=task.available_sessions[0]
+                )
     
     return {"success": True}
 
@@ -941,6 +962,14 @@ async def update_parse_task(task_id: int, request: UpdateParseTaskRequest):
 
     if updates:
         await db.update_parse_task(task_id, **updates)
+        if 'available_sessions' in updates:
+            task = await db.get_parse_task(task_id)
+            if task and task.available_sessions and task.session_alias not in task.available_sessions:
+                await db.update_parse_task(
+                    task_id,
+                    session_alias=task.available_sessions[0],
+                    current_session=task.available_sessions[0]
+                )
     
     return {"success": True}
 
@@ -1045,7 +1074,9 @@ async def create_post_parse_task(request: CreatePostParseTaskRequest):
         check_content_if_native=request.check_content_if_native,
         forward_show_source=request.forward_show_source,
         keywords_whitelist=getattr(request, 'keywords_whitelist', []) or [],
-        keywords_blacklist=getattr(request, 'keywords_blacklist', []) or []
+        keywords_blacklist=getattr(request, 'keywords_blacklist', []) or [],
+        add_signature=request.add_signature,
+        signature_options=getattr(request, 'signature_options', None)
     )
     task_id = await db.create_post_parse_task(task)
     return {"success": True, "task_id": task_id}
@@ -1088,6 +1119,8 @@ async def get_post_parse_task(task_id: int):
             "media_filter": task.media_filter,
             "keywords_whitelist": getattr(task, 'keywords_whitelist', []) or [],
             "keywords_blacklist": getattr(task, 'keywords_blacklist', []) or [],
+            "add_signature": getattr(task, 'add_signature', False),
+            "signature_options": getattr(task, 'signature_options', None),
             "last_message_id": task.last_message_id,
             "created_at": task.created_at,
             "error_message": task.error_message
@@ -1128,7 +1161,8 @@ async def update_post_parse_task(task_id: int, request: UpdatePostParseTaskReque
     for field in ['delay_seconds', 'delay_every', 'limit', 'rotate_sessions', 'rotate_every',
                   'use_proxy', 'available_sessions', 'filter_contacts', 'remove_contacts',
                   'skip_on_contacts', 'parse_direction', 'media_filter', 'use_native_forward',
-                  'check_content_if_native', 'forward_show_source', 'keywords_whitelist', 'keywords_blacklist']:
+                  'check_content_if_native', 'forward_show_source', 'keywords_whitelist', 'keywords_blacklist',
+                  'add_signature', 'signature_options']:
         value = getattr(request, field, None)
         if value is not None:
             if field == 'limit':
@@ -1138,6 +1172,14 @@ async def update_post_parse_task(task_id: int, request: UpdatePostParseTaskReque
     
     if updates:
         await db.update_post_parse_task(task_id, **updates)
+        if 'available_sessions' in updates:
+            task = await db.get_post_parse_task(task_id)
+            if task and task.available_sessions and task.session_alias not in task.available_sessions:
+                await db.update_post_parse_task(
+                    task_id,
+                    session_alias=task.available_sessions[0],
+                    current_session=task.available_sessions[0]
+                )
     
     return {"success": True}
 
@@ -1176,6 +1218,39 @@ async def stop_post_parse_task(task_id: int):
     else:
         await db.update_post_parse_task(task_id, status='paused')
         return {"success": True, "message": "Post parse task stopped"}
+
+
+@app.post("/post_parse_tasks/{task_id}/restart")
+async def restart_post_parse_task(task_id: int, request: UpdatePostParseTaskRequest):
+    """Apply settings, reset progress (forwarded_count=0, last_message_id=None), then start task."""
+    task = await db.get_post_parse_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status == 'running' and post_forwarder:
+        await post_forwarder.stop_post_parse_task(task_id)
+    updates = {}
+    for field in ['delay_seconds', 'delay_every', 'limit', 'rotate_sessions', 'rotate_every',
+                  'use_proxy', 'available_sessions', 'filter_contacts', 'remove_contacts',
+                  'skip_on_contacts', 'parse_direction', 'media_filter', 'use_native_forward',
+                  'check_content_if_native', 'forward_show_source', 'keywords_whitelist', 'keywords_blacklist',
+                  'add_signature', 'signature_options']:
+        value = getattr(request, field, None)
+        if value is not None:
+            if field == 'limit':
+                updates['post_limit'] = value
+            else:
+                updates[field] = value
+    updates['forwarded_count'] = 0
+    updates['last_message_id'] = None
+    updates['status'] = 'paused'
+    await db.update_post_parse_task(task_id, **updates)
+    if post_forwarder:
+        success = await post_forwarder.start_post_parse_task(task_id)
+        if success:
+            return {"success": True, "message": "Task restarted from beginning"}
+        return {"success": False, "error": "Failed to start task"}
+    await db.update_post_parse_task(task_id, status='running')
+    return {"success": True, "message": "Task restarted (worker not available)"}
 
 
 @app.delete("/post_parse_tasks/{task_id}")
@@ -1225,7 +1300,9 @@ async def create_post_monitoring_task(request: CreatePostMonitoringTaskRequest):
         forward_show_source=request.forward_show_source,
         media_filter=getattr(request, 'media_filter', 'all'),
         keywords_whitelist=getattr(request, 'keywords_whitelist', []) or [],
-        keywords_blacklist=getattr(request, 'keywords_blacklist', []) or []
+        keywords_blacklist=getattr(request, 'keywords_blacklist', []) or [],
+        add_signature=request.add_signature,
+        signature_options=getattr(request, 'signature_options', None)
     )
     task_id = await db.create_post_monitoring_task(task)
     return {"success": True, "task_id": task_id}
@@ -1268,7 +1345,11 @@ async def get_post_monitoring_task(task_id: int):
             "forward_show_source": task.forward_show_source,
             "media_filter": getattr(task, 'media_filter', 'all'),
             "keywords_whitelist": getattr(task, 'keywords_whitelist', []) or [],
+            "media_filter": getattr(task, 'media_filter', 'all'),
+            "keywords_whitelist": getattr(task, 'keywords_whitelist', []) or [],
             "keywords_blacklist": getattr(task, 'keywords_blacklist', []) or [],
+            "add_signature": getattr(task, 'add_signature', False),
+            "signature_options": getattr(task, 'signature_options', None),
             "created_at": task.created_at,
             "error_message": task.error_message
         }
@@ -1308,7 +1389,8 @@ async def update_post_monitoring_task(task_id: int, request: UpdatePostMonitorin
     for field in ['delay_seconds', 'limit', 'rotate_sessions', 'rotate_every',
                   'use_proxy', 'available_sessions', 'filter_contacts', 'remove_contacts',
                   'skip_on_contacts', 'use_native_forward', 'check_content_if_native',
-                  'forward_show_source', 'media_filter', 'keywords_whitelist', 'keywords_blacklist']:
+                  'forward_show_source', 'media_filter', 'keywords_whitelist', 'keywords_blacklist',
+                  'add_signature', 'signature_options']:
         value = getattr(request, field, None)
         if value is not None:
             if field == 'limit':
@@ -1318,6 +1400,14 @@ async def update_post_monitoring_task(task_id: int, request: UpdatePostMonitorin
     
     if updates:
         await db.update_post_monitoring_task(task_id, **updates)
+        if 'available_sessions' in updates:
+            task = await db.get_post_monitoring_task(task_id)
+            if task and task.available_sessions and task.session_alias not in task.available_sessions:
+                await db.update_post_monitoring_task(
+                    task_id,
+                    session_alias=task.available_sessions[0],
+                    current_session=task.available_sessions[0]
+                )
     
     return {"success": True}
 
@@ -1356,6 +1446,38 @@ async def stop_post_monitoring_task(task_id: int):
     else:
         await db.update_post_monitoring_task(task_id, status='paused')
         return {"success": True, "message": "Post monitoring task stopped"}
+
+
+@app.post("/post_monitoring_tasks/{task_id}/restart")
+async def restart_post_monitoring_task(task_id: int, request: UpdatePostMonitoringTaskRequest):
+    """Apply settings, reset progress (forwarded_count=0), then start task."""
+    task = await db.get_post_monitoring_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status == 'running' and post_forwarder:
+        await post_forwarder.stop_post_monitoring_task(task_id)
+    updates = {}
+    for field in ['delay_seconds', 'limit', 'rotate_sessions', 'rotate_every',
+                  'use_proxy', 'available_sessions', 'filter_contacts', 'remove_contacts',
+                  'skip_on_contacts', 'use_native_forward', 'check_content_if_native',
+                  'forward_show_source', 'media_filter', 'keywords_whitelist', 'keywords_blacklist',
+                  'add_signature', 'signature_options']:
+        value = getattr(request, field, None)
+        if value is not None:
+            if field == 'limit':
+                updates['post_limit'] = value
+            else:
+                updates[field] = value
+    updates['forwarded_count'] = 0
+    updates['status'] = 'paused'
+    await db.update_post_monitoring_task(task_id, **updates)
+    if post_forwarder:
+        success = await post_forwarder.start_post_monitoring_task(task_id)
+        if success:
+            return {"success": True, "message": "Task restarted from beginning"}
+        return {"success": False, "error": "Failed to start task"}
+    await db.update_post_monitoring_task(task_id, status='running')
+    return {"success": True, "message": "Task restarted (worker not available)"}
 
 
 @app.delete("/post_monitoring_tasks/{task_id}")

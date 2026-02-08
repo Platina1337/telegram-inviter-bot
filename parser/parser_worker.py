@@ -39,6 +39,14 @@ class ParserWorker:
         task = await self.db.get_parse_task(task_id)
         if not task:
             return {"success": False, "error": "Task not found"}
+        # Если текущая сессия не в списке выбранных (настройки сменили) — переключаем на первую из списка
+        if task.available_sessions and task.session_alias not in task.available_sessions:
+            await self.db.update_parse_task(
+                task_id,
+                session_alias=task.available_sessions[0],
+                current_session=task.available_sessions[0]
+            )
+            task = await self.db.get_parse_task(task_id)
         
         # Update status
         await self.db.update_parse_task(task_id, status='running')

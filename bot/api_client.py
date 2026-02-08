@@ -420,7 +420,8 @@ class APIClient:
         parse_direction: str = "backward", media_filter: str = "all",
         # Native forwarding settings
         use_native_forward: bool = False, check_content_if_native: bool = True, forward_show_source: bool = True,
-        keywords_whitelist: List[str] = None, keywords_blacklist: List[str] = None
+        keywords_whitelist: List[str] = None, keywords_blacklist: List[str] = None,
+        **kwargs
     ) -> Dict[str, Any]:
         """Create a new post parse task."""
         return await self._make_request("POST", "/post_parse_tasks", json={
@@ -450,7 +451,9 @@ class APIClient:
             "check_content_if_native": check_content_if_native,
             "forward_show_source": forward_show_source,
             "keywords_whitelist": keywords_whitelist,
-            "keywords_blacklist": keywords_blacklist
+            "keywords_blacklist": keywords_blacklist,
+            "add_signature": kwargs.get('add_signature', False),
+            "signature_options": kwargs.get('signature_options')
         })
     
     async def get_post_parse_task(self, task_id: int) -> Dict[str, Any]:
@@ -470,6 +473,10 @@ class APIClient:
         """Stop a post parse task."""
         return await self._make_request("POST", f"/post_parse_tasks/{task_id}/stop")
     
+    async def restart_post_parse_task(self, task_id: int, **kwargs) -> Dict[str, Any]:
+        """Apply settings, reset progress, and start post parse task from beginning."""
+        return await self._make_request("POST", f"/post_parse_tasks/{task_id}/restart", json=kwargs)
+    
     async def delete_post_parse_task(self, task_id: int) -> Dict[str, Any]:
         """Delete a post parse task."""
         return await self._make_request("DELETE", f"/post_parse_tasks/{task_id}")
@@ -488,7 +495,8 @@ class APIClient:
         rotate_sessions: bool = False, rotate_every: int = 0, use_proxy: bool = True,
         filter_contacts: bool = False, remove_contacts: bool = False, skip_on_contacts: bool = False,
         use_native_forward: bool = False, check_content_if_native: bool = True, forward_show_source: bool = True,
-        media_filter: str = "all", keywords_whitelist: List[str] = None, keywords_blacklist: List[str] = None
+        media_filter: str = "all", keywords_whitelist: List[str] = None, keywords_blacklist: List[str] = None,
+        **kwargs
     ) -> Dict[str, Any]:
         """Create a new post monitoring task."""
         if keywords_whitelist is None:
@@ -520,7 +528,9 @@ class APIClient:
             "forward_show_source": forward_show_source,
             "media_filter": media_filter,
             "keywords_whitelist": keywords_whitelist,
-            "keywords_blacklist": keywords_blacklist
+            "keywords_blacklist": keywords_blacklist,
+            "add_signature": kwargs.get('add_signature', False),
+            "signature_options": kwargs.get('signature_options')
         })
     
     async def get_post_monitoring_task(self, task_id: int) -> Dict[str, Any]:
@@ -539,6 +549,10 @@ class APIClient:
     async def stop_post_monitoring_task(self, task_id: int) -> Dict[str, Any]:
         """Stop a post monitoring task."""
         return await self._make_request("POST", f"/post_monitoring_tasks/{task_id}/stop")
+    
+    async def restart_post_monitoring_task(self, task_id: int, **kwargs) -> Dict[str, Any]:
+        """Apply settings, reset progress, and start post monitoring task from beginning."""
+        return await self._make_request("POST", f"/post_monitoring_tasks/{task_id}/restart", json=kwargs)
     
     async def delete_post_monitoring_task(self, task_id: int) -> Dict[str, Any]:
         """Delete a post monitoring task."""

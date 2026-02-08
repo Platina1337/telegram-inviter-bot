@@ -4,6 +4,7 @@ Database module for inviter service.
 Handles sessions, tasks, and user data storage.
 """
 import os
+import json
 import logging
 import aiosqlite
 from typing import List, Dict, Optional, Any
@@ -464,6 +465,36 @@ class Database:
         except:
             pass
 
+        # Migration: add keywords_blacklist to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN keywords_blacklist TEXT")
+        except:
+            pass
+
+        # Migration: add add_signature to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN add_signature INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add add_signature to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN add_signature INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Migration: add signature_options (JSON) to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN signature_options TEXT")
+        except:
+            pass
+
+        # Migration: add signature_options (JSON) to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN signature_options TEXT")
+        except:
+            pass
+
         await self.conn.commit()
 
     
@@ -919,7 +950,7 @@ class Database:
             'status', 'parsed_count', 'saved_count', 'parse_limit', 'delay_seconds',
             'save_every', 'rotate_sessions', 'rotate_every', 'available_sessions',
             'failed_sessions', 'current_offset', 'use_proxy',
-            'session_alias', 'error_message', 'messages_limit', 'delay_every_requests',
+            'session_alias', 'current_session', 'error_message', 'messages_limit', 'delay_every_requests',
             'rotate_every_requests', 'save_every_users', 'messages_offset',
             'filter_admins', 'filter_inactive', 'inactive_threshold_days',
             'parse_mode', 'keyword_filter', 'exclude_keywords'
@@ -1048,8 +1079,8 @@ class Database:
                 current_offset, use_proxy, filter_contacts, remove_contacts, skip_on_contacts,
                 parse_direction, media_filter, last_message_id, error_message,
                 use_native_forward, check_content_if_native, forward_show_source,
-                keywords_whitelist, keywords_blacklist
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                keywords_whitelist, keywords_blacklist, add_signature, signature_options
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.user_id, task.source_id, task.source_title, task.source_username, task.source_type,
             task.target_id, task.target_title, task.target_username, task.target_type,
@@ -1061,7 +1092,9 @@ class Database:
             task.parse_direction, task.media_filter, task.last_message_id, task.error_message,
             1 if task.use_native_forward else 0, 1 if task.check_content_if_native else 0, 1 if task.forward_show_source else 0,
             ','.join(task.keywords_whitelist) if task.keywords_whitelist else '',
-            ','.join(task.keywords_blacklist) if task.keywords_blacklist else ''
+            ','.join(task.keywords_blacklist) if task.keywords_blacklist else '',
+            1 if task.add_signature else 0,
+            json.dumps(task.signature_options) if task.signature_options else None
         ))
         await self.conn.commit()
         return cursor.lastrowid
@@ -1087,17 +1120,19 @@ class Database:
             'parse_direction', 'media_filter', 'last_message_id', 'session_alias',
             'error_message', 'last_action_time', 'current_session',
             'use_native_forward', 'check_content_if_native', 'forward_show_source',
-            'keywords_whitelist', 'keywords_blacklist'
+            'keywords_whitelist', 'keywords_blacklist', 'add_signature', 'signature_options'
         }
         updates = []
         values = []
         for key, value in kwargs.items():
             if key in allowed_fields:
                 if key in ['rotate_sessions', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts',
-                           'use_native_forward', 'check_content_if_native', 'forward_show_source']:
+                           'use_native_forward', 'check_content_if_native', 'forward_show_source', 'add_signature']:
                     value = 1 if value else 0
                 elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist']:
                     value = ','.join(value) if isinstance(value, list) else value
+                elif key == 'signature_options':
+                    value = json.dumps(value) if value is not None else None
                 updates.append(f"{key} = ?")
                 values.append(value)
         if not updates:
@@ -1139,6 +1174,12 @@ class Database:
         failed_sessions = row['failed_sessions'].split(',') if row['failed_sessions'] else []
         available_sessions = [s for s in available_sessions if s]
         failed_sessions = [s for s in failed_sessions if s]
+        sig_opts = None
+        if 'signature_options' in row.keys() and row['signature_options']:
+            try:
+                sig_opts = json.loads(row['signature_options'])
+            except (TypeError, ValueError):
+                pass
         return PostParseTask(
             id=row['id'], user_id=row['user_id'], source_id=row['source_id'],
             source_title=row['source_title'] or '',
@@ -1168,7 +1209,9 @@ class Database:
             check_content_if_native=bool(row['check_content_if_native']) if 'check_content_if_native' in row.keys() else True,
             forward_show_source=bool(row['forward_show_source']) if 'forward_show_source' in row.keys() else True,
             keywords_whitelist=row['keywords_whitelist'].split(',') if 'keywords_whitelist' in row.keys() and row['keywords_whitelist'] else [],
-            keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else []
+            keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else [],
+            add_signature=bool(row['add_signature']) if 'add_signature' in row.keys() else False,
+            signature_options=sig_opts
         )
 
     # ============== Post Monitoring Tasks ==============
@@ -1184,8 +1227,8 @@ class Database:
                 rotate_sessions, rotate_every, available_sessions, failed_sessions,
                 use_proxy, filter_contacts, remove_contacts, skip_on_contacts, error_message,
                 use_native_forward, check_content_if_native, forward_show_source,
-                media_filter, keywords_whitelist, keywords_blacklist
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                media_filter, keywords_whitelist, keywords_blacklist, add_signature, signature_options
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.user_id, task.source_id, task.source_title, task.source_username, task.source_type,
             task.target_id, task.target_title, task.target_username, task.target_type,
@@ -1198,7 +1241,9 @@ class Database:
             1 if task.use_native_forward else 0, 1 if task.check_content_if_native else 0, 1 if task.forward_show_source else 0,
             task.media_filter,
             ','.join(task.keywords_whitelist) if task.keywords_whitelist else '',
-            ','.join(task.keywords_blacklist) if task.keywords_blacklist else ''
+            ','.join(task.keywords_blacklist) if task.keywords_blacklist else '',
+            1 if task.add_signature else 0,
+            json.dumps(task.signature_options) if task.signature_options else None
         ))
         await self.conn.commit()
         return cursor.lastrowid
@@ -1221,16 +1266,18 @@ class Database:
             'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts', 'session_alias',
             'error_message', 'last_action_time', 'current_session',
             'use_native_forward', 'check_content_if_native', 'forward_show_source',
-            'media_filter', 'keywords_whitelist', 'keywords_blacklist'
+            'media_filter', 'keywords_whitelist', 'keywords_blacklist', 'add_signature', 'signature_options'
         }
         updates = []
         values = []
         for key, value in kwargs.items():
             if key in allowed_fields:
-                if key in ['rotate_sessions', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts', 'use_native_forward', 'check_content_if_native', 'forward_show_source']:
+                if key in ['rotate_sessions', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts', 'use_native_forward', 'check_content_if_native', 'forward_show_source', 'add_signature']:
                     value = 1 if value else 0
                 elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist']:
                     value = ','.join(value) if isinstance(value, list) else value
+                elif key == 'signature_options':
+                    value = json.dumps(value) if value is not None else None
                 updates.append(f"{key} = ?")
                 values.append(value)
         if not updates:
@@ -1272,6 +1319,12 @@ class Database:
         failed_sessions = row['failed_sessions'].split(',') if row['failed_sessions'] else []
         available_sessions = [s for s in available_sessions if s]
         failed_sessions = [s for s in failed_sessions if s]
+        sig_opts = None
+        if 'signature_options' in row.keys() and row['signature_options']:
+            try:
+                sig_opts = json.loads(row['signature_options'])
+            except (TypeError, ValueError):
+                pass
         return PostMonitoringTask(
             id=row['id'], user_id=row['user_id'], source_id=row['source_id'],
             source_title=row['source_title'] or '',
@@ -1297,6 +1350,8 @@ class Database:
             current_session=row['current_session'] if 'current_session' in row.keys() else None,
             media_filter=row['media_filter'] if 'media_filter' in row.keys() else 'all',
             keywords_whitelist=row['keywords_whitelist'].split(',') if 'keywords_whitelist' in row.keys() and row['keywords_whitelist'] else [],
-            keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else []
+            keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else [],
+            add_signature=bool(row['add_signature']) if 'add_signature' in row.keys() else False,
+            signature_options=sig_opts
         )
 

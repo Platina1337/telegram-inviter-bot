@@ -165,6 +165,54 @@ class PostForwarder:
             text = re.sub(r'\s+', ' ', text).strip()
         
         return text
+
+    def _generate_signature(
+        self,
+        message: PyrogramMessage,
+        source_title: str,
+        source_username: str = None,
+        signature_options: dict = None
+    ) -> str:
+        """Generate signature for forwarded message.
+        signature_options: include_post, include_source, include_author (bool),
+                          label_post, label_source, label_author (str).
+        Backward compat: if label_post missing, label_source is used for post line.
+        """
+        opts = signature_options or {}
+        include_post = opts.get('include_post', True)
+        include_source = opts.get('include_source', False)
+        include_author = opts.get('include_author', True)
+        label_post = (opts.get('label_post') or opts.get('label_source') or 'Ссылка на пост').strip()
+        label_source = (opts.get('label_source') or 'Источник').strip()
+        label_author = (opts.get('label_author') or 'Обращаться по объявлению сюда:').strip()
+
+        parts = []
+        username = source_username or (message.chat.username if message.chat else None)
+        clean_username = username.replace('@', '').replace('https://t.me/', '').split('/')[0] if username else None
+        source_name = (source_title or username or (message.chat.title if message.chat else None) or 'Source').replace('[', '').replace(']', '')
+
+        if include_post and clean_username:
+            post_link = f"https://t.me/{clean_username}/{message.id}"
+            parts.append(f"{label_post}: [{source_name}]({post_link})")
+        if include_source and clean_username:
+            channel_link = f"https://t.me/{clean_username}"
+            parts.append(f"{label_source}: [{source_name}]({channel_link})")
+        if include_author:
+            author_link = ""
+            author_name = ""
+            if message.from_user:
+                author_link = f"https://t.me/{message.from_user.username}" if message.from_user.username else f"tg://user?id={message.from_user.id}"
+                author_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip() or "User"
+            elif message.sender_chat and getattr(message.sender_chat, 'username', None):
+                author_link = f"https://t.me/{message.sender_chat.username}"
+                author_name = (message.sender_chat.title or "Channel").replace('[', '').replace(']', '')
+            if author_link:
+                author_name = author_name.replace('[', '').replace(']', '') if author_name else "User"
+                parts.append(f"{label_author} [{author_name}]({author_link})")
+
+        if not parts:
+            return ""
+        return "\n\n" + "\n".join(parts)
     
     def _message_has_content(self, message: PyrogramMessage) -> bool:
         """Check if message has any content — all possible Pyrogram Message fields.
@@ -351,6 +399,14 @@ class PostForwarder:
             if not task:
                 logger.error(f"[POST_FORWARDER] Task {task_id} not found")
                 return
+            # Если текущая сессия не в списке выбранных (настройки сменили) — переключаем на первую из списка
+            if task.available_sessions and task.session_alias not in task.available_sessions:
+                await self.db.update_post_parse_task(
+                    task_id,
+                    session_alias=task.available_sessions[0],
+                    current_session=task.available_sessions[0]
+                )
+                task = await self.db.get_post_parse_task(task_id)
             
             await self.db.update_post_parse_task(task_id, status='running')
             
@@ -395,7 +451,8 @@ class PostForwarder:
                     f"skip_on_contacts={getattr(task, 'skip_on_contacts', False)}, "
                     f"forward_show_source={getattr(task, 'forward_show_source', True)}, "
                     f"filter_contacts={getattr(task, 'filter_contacts', False)}, "
-                    f"remove_contacts={getattr(task, 'remove_contacts', False)}"
+                    f"remove_contacts={getattr(task, 'remove_contacts', False)}, "
+                    f"add_signature={getattr(task, 'add_signature', False)}"
                 )
                 
                 # Initialize counters
@@ -614,12 +671,20 @@ class PostForwarder:
                                 if is_media_group:
                                     await self._forward_media_group(
                                         client, post_messages, task.target_id,
-                                        task.filter_contacts, task.remove_contacts
+                                        task.filter_contacts, task.remove_contacts,
+                                        getattr(task, 'add_signature', False),
+                                        task.source_title,
+                                        getattr(task, 'source_username', None),
+                                        signature_options=getattr(task, 'signature_options', None)
                                     )
                                 else:
                                     await self._forward_message(
                                         client, post_messages[0], task.target_id,
-                                        task.filter_contacts, task.remove_contacts
+                                        task.filter_contacts, task.remove_contacts,
+                                        getattr(task, 'add_signature', False),
+                                        task.source_title,
+                                        getattr(task, 'source_username', None),
+                                        signature_options=getattr(task, 'signature_options', None)
                                     )
                                 
                                 post_forwarded = True
@@ -783,7 +848,11 @@ class PostForwarder:
         message: PyrogramMessage, 
         target_id: int,
         filter_contacts: bool = False,
-        remove_contacts: bool = False
+        remove_contacts: bool = False,
+        add_signature: bool = False,
+        source_title: str = "",
+        source_username: str = None,
+        **kwargs
     ):
         """Forward a single message to target channel/group.
         
@@ -794,6 +863,15 @@ class PostForwarder:
         text = message.text or message.caption or ""
         if filter_contacts or remove_contacts:
             text = self._filter_contacts(text, filter_contacts, remove_contacts)
+        
+        # Add signature if enabled
+        if add_signature:
+            signature = self._generate_signature(
+                message, source_title, source_username,
+                signature_options=kwargs.get('signature_options')
+            )
+            if signature:
+                text += signature
         
         # Send message based on type
         if message.photo:
@@ -820,7 +898,11 @@ class PostForwarder:
         messages: List[PyrogramMessage],
         target_id: int,
         filter_contacts: bool = False,
-        remove_contacts: bool = False
+        remove_contacts: bool = False,
+        add_signature: bool = False,
+        source_title: str = "",
+        source_username: str = None,
+        **kwargs
     ):
         """Forward a media group as a single album.
         
@@ -843,6 +925,17 @@ class PostForwarder:
                 caption = msg.text or msg.caption or ""
                 if filter_contacts or remove_contacts:
                     caption = self._filter_contacts(caption, filter_contacts, remove_contacts)
+                
+                # Add signature if enabled
+                if add_signature:
+                    signature = self._generate_signature(
+                        msg, source_title, source_username,
+                        signature_options=kwargs.get('signature_options')
+                    )
+                    if signature:
+                        caption += signature
+                
+
             
             # Build InputMedia based on message type
             if msg.photo:
@@ -1040,6 +1133,14 @@ class PostForwarder:
             if not task:
                 logger.error(f"[POST_FORWARDER] Monitoring task {task_id} not found")
                 return
+            # Если текущая сессия не в списке выбранных (настройки сменили) — переключаем на первую из списка
+            if task.available_sessions and task.session_alias not in task.available_sessions:
+                await self.db.update_post_monitoring_task(
+                    task_id,
+                    session_alias=task.available_sessions[0],
+                    current_session=task.available_sessions[0]
+                )
+                task = await self.db.get_post_monitoring_task(task_id)
             
             await self.db.update_post_monitoring_task(task_id, status='running')
             
@@ -1192,9 +1293,44 @@ class PostForwarder:
                         )
                     else:
                         # Copy mode: use existing copy logic
+                        # Apply media filter (only in copy mode)
+                        media_filter = getattr(task, 'media_filter', 'all')
+                        # Check first message (representative)
+                        if self._should_skip_message(messages[0], media_filter):
+                            logger.info(
+                                f"[POST_FORWARDER] Monitoring task {task_id}: Skipped media group {media_group_id} "
+                                f"(причина: media_filter={media_filter})"
+                            )
+                            # Cleanup
+                            if media_group_id in media_group_buffer:
+                                del media_group_buffer[media_group_id]
+                            if media_group_id in media_group_timers:
+                                media_group_timers[media_group_id].cancel()
+                                del media_group_timers[media_group_id]
+                            return
+                            
+                        # Check for contacts and skip if skip_on_contacts is enabled (only in copy mode)
+                        skip_on_contacts = getattr(task, 'skip_on_contacts', False)
+                        if skip_on_contacts and self._post_has_contacts(messages):
+                            logger.info(
+                                f"[POST_FORWARDER] Monitoring task {task_id}: Skipped media group {media_group_id} "
+                                f"(причина: skip_on_contacts=True, обнаружены контакты в тексте)"
+                            )
+                            # Cleanup
+                            if media_group_id in media_group_buffer:
+                                del media_group_buffer[media_group_id]
+                            if media_group_id in media_group_timers:
+                                media_group_timers[media_group_id].cancel()
+                                del media_group_timers[media_group_id]
+                            return
+
                         await self._forward_media_group(
                             client, messages, task.target_id,
-                            task.filter_contacts, task.remove_contacts
+                            task.filter_contacts, task.remove_contacts,
+                            getattr(task, 'add_signature', False),
+                            task.source_title,
+                            getattr(task, 'source_username', None),
+                            signature_options=getattr(task, 'signature_options', None)
                         )
                     
                     # Increment counter ONLY after successful forward (one post = one media group)
@@ -1425,7 +1561,11 @@ class PostForwarder:
                         # Copy mode: use existing copy logic
                         await self._forward_message(
                             client, message, task.target_id,
-                            task.filter_contacts, task.remove_contacts
+                            task.filter_contacts, task.remove_contacts,
+                            getattr(task, 'add_signature', False),
+                            task.source_title,
+                            getattr(task, 'source_username', None),
+                            signature_options=getattr(task, 'signature_options', None)
                         )
                     
                     # Increment counter ONLY after successful forward

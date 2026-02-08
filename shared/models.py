@@ -3,7 +3,7 @@
 Shared models for the inviter bot.
 """
 from dataclasses import dataclass, field
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict, Any
 from datetime import datetime
 
 
@@ -174,6 +174,9 @@ class PostParseTask:
     use_native_forward: bool = False  # Use native Telegram forwarding (forward_messages) instead of copying
     check_content_if_native: bool = True  # Check for content before forwarding (only when use_native_forward=True)
     forward_show_source: bool = True  # Show "Forwarded from" in forwarded messages (only when use_native_forward=True)
+    add_signature: bool = False  # Add signature with link to original post and author (only when use_native_forward=False)
+    # Signature options when add_signature=True: include_post, include_source, include_author (bool), label_post, label_source, label_author (str)
+    signature_options: Optional[Dict[str, Any]] = None
     # Timing and session tracking
     last_action_time: Optional[str] = None
     current_session: Optional[str] = None
@@ -218,6 +221,8 @@ class PostMonitoringTask:
     use_native_forward: bool = False  # Use native Telegram forwarding (forward_messages) instead of copying
     check_content_if_native: bool = True  # Check for content before forwarding (only when use_native_forward=True)
     forward_show_source: bool = True  # Show "Forwarded from" in forwarded messages (only when use_native_forward=True)
+    add_signature: bool = False  # Add signature with link to original post and author (only when use_native_forward=False)
+    signature_options: Optional[Dict[str, Any]] = None
     # Timing and session tracking
     last_action_time: Optional[str] = None
     current_session: Optional[str] = None

@@ -89,6 +89,10 @@ FSM_POST_FORWARD_SETTINGS_ROTATE_EVERY = "post_forward_settings_rotate_every"
 FSM_POST_FORWARD_SETTINGS_NATIVE = "post_forward_settings_native"
 FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST = "post_forward_settings_keywords_whitelist"
 FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST = "post_forward_settings_keywords_blacklist"
+FSM_POST_FORWARD_SIGNATURE_LABEL_POST = "post_forward_signature_label_post"
+FSM_POST_FORWARD_SIGNATURE_LABEL_SOURCE = "post_forward_signature_label_source"
+FSM_POST_FORWARD_SIGNATURE_LABEL_AUTHOR = "post_forward_signature_label_author"
+FSM_PP_EDIT_SESSION_SELECT = "pp_edit_session_select"  # выбор сессий при редактировании PP/PM из статуса
 
 # ============== User State Keys (standardized) ==============
 # Use these constants instead of raw strings for consistency
@@ -354,8 +358,12 @@ def get_settings_keyboard(current_settings: Dict = None, edit_mode: bool = False
     return InlineKeyboardMarkup(buttons)
 
 
-async def get_session_select_keyboard(selected_aliases: List[str] = None) -> InlineKeyboardMarkup:
-    """Keyboard for selecting sessions for inviting."""
+async def get_session_select_keyboard(
+    selected_aliases: List[str] = None,
+    done_callback: str = "sessions_done",
+    back_callback: str = "sessions_back",
+) -> InlineKeyboardMarkup:
+    """Keyboard for selecting sessions (invite/parse/create or PP/PM edit)."""
     selected = selected_aliases or []
     
     result = await api_client.list_sessions()
@@ -371,8 +379,8 @@ async def get_session_select_keyboard(selected_aliases: List[str] = None) -> Inl
         btn_text = f"{prefix} {alias} ({phone})"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=f"toggle_session:{alias}")])
     
-    buttons.append([InlineKeyboardButton("✅ Готово", callback_data="sessions_done")])
-    buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="sessions_back")])
+    buttons.append([InlineKeyboardButton("✅ Готово", callback_data=done_callback)])
+    buttons.append([InlineKeyboardButton("🔙 Назад", callback_data=back_callback)])
     
     return InlineKeyboardMarkup(buttons)
 
@@ -523,7 +531,11 @@ def format_invite_status(task_data: Dict) -> str:
         except:
             pass
     
-    # Show current active session if rotation is enabled
+    # Эффективная активная сессия: если текущая не в списке выбранных (настройки сменили) — показываем первую из списка
+    effective_session = task_data.get('session') or task_data.get('current_session') or 'N/A'
+    if available_sessions and effective_session not in available_sessions:
+        effective_session = available_sessions[0]
+    # Доп. строка «Активная сессия» только при ротации
     current_session_info = ""
     if task_data.get('rotate_sessions') and task_data.get('current_session'):
         current_session_info = f"\n🔐 Активная сессия: {task_data['current_session']}"
@@ -536,7 +548,7 @@ def format_invite_status(task_data: Dict) -> str:
 
 👥 Приглашено: {invited}{limit_text}
 ⏱️ Задержка: ~{task_data.get('delay_seconds', 30)} сек (каждые {task_data.get('delay_every', 1)} инв.){time_until_next}
-🔐 Сессия: {task_data.get('session', 'N/A')}
+🔐 Сессия: {effective_session}
 📋 Сессии: {sessions_text}{current_session_info}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
@@ -628,10 +640,12 @@ def format_parse_status(task_data: Dict) -> str:
         except:
             pass
     
-    # Show current active session if rotation is enabled
-    current_session_display = task_data.get('session', 'N/A')
+    # Эффективная сессия: если текущая не в списке выбранных — показываем первую из списка
+    current_session_display = task_data.get('session') or task_data.get('current_session') or 'N/A'
+    if available_sessions and current_session_display not in available_sessions:
+        current_session_display = available_sessions[0]
     if task_data.get('rotate_sessions') and task_data.get('current_session'):
-        current_session_display = f"{task_data['current_session']} ⚡"
+        current_session_display = f"{current_session_display} ⚡"
         
     # Filters
     filters = []
@@ -1120,6 +1134,8 @@ def get_post_forward_settings_message_text(
     ]
     if sessions_count is not None:
         lines.append(f"🔐 Сессий выбрано: {sessions_count}\n")
+    if settings.get('add_signature'):
+        lines.append(f"✍️ Подпись: Включена\n")
     lines.append(f"\n{display_line}\n\n")
     lines.append("Настройте параметры или нажмите 🚀 Запустить:")
     return "".join(lines)
@@ -1169,6 +1185,7 @@ def get_post_forward_settings_keyboard(current_settings: Dict = None, mode: str 
     rotate_text = "✅" if rotate else "❌"
     proxy_text = "✅" if use_proxy else "❌"
     rotate_every_text = f"{rotate_every} пост." if rotate and rotate_every > 0 else "При ошибке"
+    signature_text = "✅" if settings.get('add_signature') else "❌"
 
     # Keywords info
     whitelist = settings.get('keywords_whitelist', [])
@@ -1200,6 +1217,12 @@ def get_post_forward_settings_keyboard(current_settings: Dict = None, mode: str 
         [InlineKeyboardButton(f"🌐 Использовать прокси: {proxy_text}", callback_data="pf_settings_proxy")],
     ])
 
+    # Show signature option only if native is NOT enabled
+    if not use_native_forward:
+        buttons.append([InlineKeyboardButton(f"✍️ Добавлять подпись: {signature_text}", callback_data="pf_settings_signature")])
+        if settings.get('add_signature'):
+            buttons.append([InlineKeyboardButton("✏️ Настроить подпись", callback_data="pf_signature_menu")])
+
     # Native & content settings
     native_text = "✅ Вкл" if use_native_forward else "❌ Выкл"
     buttons.append([InlineKeyboardButton(f"⚡ Нативная пересылка: {native_text}", callback_data="pf_native_toggle")])
@@ -1211,14 +1234,21 @@ def get_post_forward_settings_keyboard(current_settings: Dict = None, mode: str 
 
     buttons.append([InlineKeyboardButton(f"📞 При контактах: {contact_action_text}", callback_data="pf_settings_contact_action")])
     
+    # Выбор сессий при редактировании задачи (PP/PM из статуса задач)
+    if edit_mode and task_id is not None:
+        sessions_callback = f"pp_settings_sessions:{task_id}" if mode == "parse" else f"pm_settings_sessions:{task_id}"
+        buttons.append([InlineKeyboardButton("🔐 Выбор сессий", callback_data=sessions_callback)])
+    
     # Bottom buttons depend on edit_mode
     if edit_mode:
-        # In edit mode: Save and Cancel buttons
+        # In edit mode: Save (back to details), Restart (reset progress & start), Cancel
         if mode == "parse":
             buttons.append([InlineKeyboardButton("💾 Сохранить", callback_data=f"pp_settings_save:{task_id}")])
+            buttons.append([InlineKeyboardButton("🔄 Запустить заново", callback_data=f"pp_settings_restart:{task_id}")])
             buttons.append([InlineKeyboardButton("❌ Отмена", callback_data=f"pp_settings_cancel:{task_id}")])
         else:  # monitor mode
             buttons.append([InlineKeyboardButton("💾 Сохранить", callback_data=f"pm_settings_save:{task_id}")])
+            buttons.append([InlineKeyboardButton("🔄 Запустить заново", callback_data=f"pm_settings_restart:{task_id}")])
             buttons.append([InlineKeyboardButton("❌ Отмена", callback_data=f"pm_settings_cancel:{task_id}")])
     else:
         # In create mode: Start and Back buttons
@@ -1226,6 +1256,52 @@ def get_post_forward_settings_keyboard(current_settings: Dict = None, mode: str 
         buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="pf_settings_back")])
     
     return InlineKeyboardMarkup(buttons)
+
+
+def get_default_signature_options() -> Dict:
+    """Default options when enabling signature."""
+    return {
+        'include_post': True,
+        'include_source': False,
+        'include_author': True,
+        'label_post': 'Ссылка на пост',
+        'label_source': 'Источник',
+        'label_author': 'Обращаться по объявлению сюда:'
+    }
+
+
+def get_signature_options_keyboard(settings: Dict) -> InlineKeyboardMarkup:
+    """Keyboard for signature options sub-menu."""
+    opts = settings.get('signature_options') or get_default_signature_options()
+    inc_post = opts.get('include_post', True)
+    inc_src = opts.get('include_source', False)
+    inc_author = opts.get('include_author', True)
+    label_post = (opts.get('label_post') or opts.get('label_source') or 'Ссылка на пост')[:25]
+    label_src = (opts.get('label_source') or 'Источник')[:25]
+    label_author = (opts.get('label_author') or 'Обращаться...')[:25]
+    buttons = [
+        [InlineKeyboardButton(f"📎 Ссылка на пост: {'✅' if inc_post else '❌'}", callback_data="pf_sig_include_post")],
+        [InlineKeyboardButton(f"📂 Ссылка на источник (канал): {'✅' if inc_src else '❌'}", callback_data="pf_sig_include_source")],
+        [InlineKeyboardButton(f"👤 Ссылка на автора: {'✅' if inc_author else '❌'}", callback_data="pf_sig_include_author")],
+        [InlineKeyboardButton(f"🏷 Текст для поста: «{label_post}»", callback_data="pf_sig_label_post")],
+        [InlineKeyboardButton(f"🏷 Текст для источника: «{label_src}»", callback_data="pf_sig_label_source")],
+        [InlineKeyboardButton(f"🏷 Текст для автора: «{label_author}»", callback_data="pf_sig_label_author")],
+        [InlineKeyboardButton("✅ Готово", callback_data="pf_sig_done")]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def get_signature_options_message_text(settings: Dict) -> str:
+    """Message text for signature options sub-menu."""
+    return (
+        "✏️ **Настройка подписи**\n\n"
+        "Выберите, что добавлять в конец поста:\n"
+        "• **Ссылка на пост** — прямая ссылка на сообщение\n"
+        "• **Ссылка на источник** — ссылка на канал/группу\n"
+        "• **Ссылка на автора** — ссылка на отправителя\n\n"
+        "Для каждого типа ссылки можно задать свой текст (по умолчанию: «Ссылка на пост», «Источник», «Обращаться по объявлению сюда:»).\n\n"
+        "Нажмите **Готово**, чтобы вернуться к настройкам."
+    )
 
 
 async def get_post_forward_session_keyboard(selected_aliases: List[str] = None, sessions: List[Dict] = None) -> InlineKeyboardMarkup:
@@ -1389,9 +1465,11 @@ def format_post_parse_status(task_data: Dict) -> str:
         rotate_info += f" (каждые {rotate_every} пост.)"
     
     proxy_info = 'Да' if task_data.get('use_proxy') else 'Нет'
-    filter_contacts_info = 'Да' if task_data.get('filter_contacts') else 'Нет'
-    remove_contacts_info = 'Да' if task_data.get('remove_contacts') else 'Нет'
-    
+    filter_contacts_info = 'Да' if task_data.get('filter_contacts', False) else 'Нет'
+    remove_contacts_info = 'Да' if task_data.get(
+        'remove_contacts') else 'Нет'
+    add_signature_info = 'Да' if task_data.get('add_signature') else 'Нет'
+
     direction = task_data.get('parse_direction', 'backward')
     direction_text = "Старые первыми" if direction == 'backward' else "Новые первыми"
     
@@ -1400,6 +1478,9 @@ def format_post_parse_status(task_data: Dict) -> str:
     
     available_sessions = task_data.get('available_sessions', [])
     sessions_text = ', '.join(available_sessions) if available_sessions else task_data.get('session', 'N/A')
+    effective_session = task_data.get('session') or task_data.get('current_session') or 'N/A'
+    if available_sessions and effective_session not in available_sessions:
+        effective_session = available_sessions[0]
     
     text = f"""
 {icon} **Статус парсинга постов**
@@ -1411,12 +1492,13 @@ def format_post_parse_status(task_data: Dict) -> str:
 📋 Направление: {direction_text}
 🎬 Фильтр медиа: {media_text}
 ⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек (каждые {task_data.get('delay_every', 1)} пост.)
-🔐 Сессия: {task_data.get('session', 'N/A')}
+🔐 Сессия: {effective_session}
 📋 Сессии: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 📞 Фильтр контактов: {filter_contacts_info}
 🗑️ Удалять контакты: {remove_contacts_info}
+✍️ Добавлять подпись: {add_signature_info}
 
 📋 Статус: {status_text}
 """
@@ -1461,9 +1543,13 @@ def format_post_monitor_status(task_data: Dict) -> str:
     proxy_info = 'Да' if task_data.get('use_proxy') else 'Нет'
     filter_contacts_info = 'Да' if task_data.get('filter_contacts') else 'Нет'
     remove_contacts_info = 'Да' if task_data.get('remove_contacts') else 'Нет'
+    add_signature_info = 'Да' if task_data.get('add_signature') else 'Нет'
     
     available_sessions = task_data.get('available_sessions', [])
     sessions_text = ', '.join(available_sessions) if available_sessions else task_data.get('session', 'N/A')
+    effective_session = task_data.get('session') or task_data.get('current_session') or 'N/A'
+    if available_sessions and effective_session not in available_sessions:
+        effective_session = available_sessions[0]
     
     text = f"""
 {icon} **Статус мониторинга постов**
@@ -1473,12 +1559,13 @@ def format_post_monitor_status(task_data: Dict) -> str:
 
 📨 Переслано: {forwarded}{limit_text}
 ⏱️ Задержка: {task_data.get('delay_seconds', 0)} сек
-🔐 Сессия: {task_data.get('session', 'N/A')}
+🔐 Сессия: {effective_session}
 📋 Сессии: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 📞 Фильтр контактов: {filter_contacts_info}
 🗑️ Удалять контакты: {remove_contacts_info}
+✍️ Добавлять подпись: {add_signature_info}
 
 📋 Статус: {status_text}
 """
