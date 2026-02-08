@@ -467,13 +467,13 @@ class SessionManager:
                 # Parse proxy string
                 proxy_dict = parse_proxy_string(proxy_str)
                 if proxy_dict:
-                    scheme = proxy_dict.get("scheme", "socks5")
+                    scheme = (proxy_dict.get("scheme") or "socks5").lower()
                     hostname = proxy_dict.get("hostname")
                     port = proxy_dict.get("port")
                     username = proxy_dict.get("username")
                     password = proxy_dict.get("password")
                     
-                    # Handle SOCKS5 proxy with httpx-socks
+                    # Handle SOCKS5/SOCKS4 proxy with httpx-socks
                     if scheme in ("socks5", "socks4"):
                         if not SOCKS5_SUPPORT:
                             logger.error("SOCKS5 прокси требует библиотеку httpx-socks. Установите: pip install httpx-socks")
@@ -487,16 +487,13 @@ class SessionManager:
                         
                         transport = AsyncProxyTransport.from_url(proxy_url)
                     else:
-                        # Handle HTTP/HTTPS proxy (native httpx support)
+                        # Handle HTTP/HTTPS proxy (native httpx: один параметр proxy, не proxies)
                         if username and password:
                             proxy_url = f"{scheme}://{username}:{password}@{hostname}:{port}"
                         else:
                             proxy_url = f"{scheme}://{hostname}:{port}"
                         
-                        proxies = {
-                            "http://": proxy_url,
-                            "https://": proxy_url
-                        }
+                        proxies = proxy_url
             
             # Try each IP service
             for service_url in ip_services:
@@ -512,8 +509,8 @@ class SessionManager:
                         client_kwargs["transport"] = transport
                         logger.debug(f"Использование SOCKS транспорта для {service_url}")
                     elif proxies:
-                        # HTTP/HTTPS proxy - use proxies
-                        client_kwargs["proxies"] = proxies
+                        # HTTP/HTTPS proxy - httpx принимает proxy=url (не proxies)
+                        client_kwargs["proxy"] = proxies
                         logger.debug(f"Использование HTTP прокси для {service_url}")
                     
                     async with httpx.AsyncClient(**client_kwargs) as http_client:
