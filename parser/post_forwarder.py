@@ -916,43 +916,44 @@ class PostForwarder:
         if not messages:
             return
         
-        media_list = []
+        # Caption in Telegram media groups can be on any message; take from first that has text/caption
+        caption = ""
+        caption_msg = None
+        for msg in messages:
+            raw = msg.text or msg.caption or ""
+            if raw:
+                caption = raw
+                caption_msg = msg
+                break
+        if filter_contacts or remove_contacts:
+            caption = self._filter_contacts(caption, filter_contacts, remove_contacts)
+        if add_signature and caption_msg is not None:
+            signature = self._generate_signature(
+                caption_msg, source_title, source_username,
+                signature_options=kwargs.get('signature_options')
+            )
+            if signature:
+                caption += signature
         
+        media_list = []
         for idx, msg in enumerate(messages):
-            # Process caption (only for first item)
-            caption = ""
-            if idx == 0:
-                caption = msg.text or msg.caption or ""
-                if filter_contacts or remove_contacts:
-                    caption = self._filter_contacts(caption, filter_contacts, remove_contacts)
-                
-                # Add signature if enabled
-                if add_signature:
-                    signature = self._generate_signature(
-                        msg, source_title, source_username,
-                        signature_options=kwargs.get('signature_options')
-                    )
-                    if signature:
-                        caption += signature
-                
-
-            
-            # Build InputMedia based on message type
+            # Attach caption only to the first media item (Telegram allows one caption per album)
+            item_caption = caption if idx == 0 else None
             if msg.photo:
                 media_list.append(
-                    InputMediaPhoto(msg.photo.file_id, caption=caption if idx == 0 else None)
+                    InputMediaPhoto(msg.photo.file_id, caption=item_caption)
                 )
             elif msg.video:
                 media_list.append(
-                    InputMediaVideo(msg.video.file_id, caption=caption if idx == 0 else None)
+                    InputMediaVideo(msg.video.file_id, caption=item_caption)
                 )
             elif msg.document:
                 media_list.append(
-                    InputMediaDocument(msg.document.file_id, caption=caption if idx == 0 else None)
+                    InputMediaDocument(msg.document.file_id, caption=item_caption)
                 )
             elif msg.audio:
                 media_list.append(
-                    InputMediaAudio(msg.audio.file_id, caption=caption if idx == 0 else None)
+                    InputMediaAudio(msg.audio.file_id, caption=item_caption)
                 )
         
         if media_list:
