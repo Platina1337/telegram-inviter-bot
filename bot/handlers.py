@@ -5028,14 +5028,6 @@ async def handle_post_forward_callback(client: Client, callback_query):
             await safe_answer_callback(callback_query, f"❌ Ошибка: {task_result.get('error')}", show_alert=True)
             return True
         task = task_result['task']
-        answer_msg = "🔄 Статус обновлен"
-        if task.get('status') == 'running':
-            stop_result = await api_client.stop_post_monitoring_task(task_id)
-            if stop_result.get('success'):
-                task_result = await api_client.get_post_monitoring_task(task_id)
-                if task_result.get('success'):
-                    task = task_result['task']
-                    answer_msg = "⏸️ Задача приостановлена (открытие деталей)"
         keyboard = get_post_monitor_running_keyboard(task_id) if task['status'] == 'running' else get_post_monitor_paused_keyboard(task_id)
         try:
             await callback_query.message.edit_text(
@@ -5046,7 +5038,7 @@ async def handle_post_forward_callback(client: Client, callback_query):
             pass
         except Exception as e:
             logger.error(f"Error refreshing post monitoring task: {e}")
-        await safe_answer_callback(callback_query, answer_msg)
+        await safe_answer_callback(callback_query, "🔄 Статус обновлен")
         return True
     
     return False

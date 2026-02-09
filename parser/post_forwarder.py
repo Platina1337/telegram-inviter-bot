@@ -6,11 +6,12 @@ Adapted from example/parser/forwarder.py for the inviter bot.
 import asyncio
 import logging
 import re
+import httpx
 from datetime import datetime
 from typing import Dict, Optional, Callable, List, Tuple, Any
 
 from pyrogram import Client
-from pyrogram.errors import FloodWait, ChannelPrivate, ChatAdminRequired
+from pyrogram.errors import FloodWait, ChannelPrivate, ChatAdminRequired, ChatWriteForbidden
 from pyrogram.types import Message as PyrogramMessage
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument, InputMediaAudio
 
@@ -62,6 +63,36 @@ class PostForwarder:
                 await self.session_manager.release_client(session_alias)
             except Exception as e:
                 logger.warning(f"[POST_FORWARDER] Error releasing client {session_alias}: {e}")
+    
+    async def _notify_user(self, user_id: int, message: str):
+        """Send notification to user via Telegram Bot API (like inviter)."""
+        if not getattr(config, 'BOT_TOKEN', None):
+            logger.warning("[POST_FORWARDER] BOT_TOKEN not set, skip notification")
+            return
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage",
+                    json={"chat_id": user_id, "text": message, "parse_mode": "Markdown"},
+                    timeout=10.0
+                )
+        except Exception as e:
+            logger.error(f"[POST_FORWARDER] Failed to send notification to user {user_id}: {e}")
+    
+    def _is_session_error(self, e: Exception) -> bool:
+        """True if error is due to session/access (no rights, ban, flood) — then retry same post with other sessions."""
+        err_str = str(e).upper()
+        if isinstance(e, (FloodWait, ChannelPrivate, ChatAdminRequired, ChatWriteForbidden)):
+            return True
+        if "403" in err_str or "CHAT_SEND" in err_str or "CHANNEL_PRIVATE" in err_str:
+            return True
+        if "CHAT_ADMIN_REQUIRED" in err_str or "CHAT_WRITE_FORBIDDEN" in err_str:
+            return True
+        if "USER_BANNED" in err_str or "AUTH_KEY" in err_str or "SESSION" in err_str:
+            return True
+        if "FLOOD" in err_str or "PEER_FLOOD" in err_str:
+            return True
+        return False
     
     def _has_contacts(self, text: str, entities: List = None) -> bool:
         """Check if text contains user tags, phone numbers, or links.
@@ -417,10 +448,13 @@ class PostForwarder:
             
             client = await self._get_client(session_alias, task.use_proxy)
             if not client:
+                error_msg = f"Не удалось подключить сессию '{session_alias}'"
                 await self.db.update_post_parse_task(
-                    task_id, 
-                    status='failed', 
-                    error_message=f"Could not connect to session {session_alias}"
+                    task_id, status='failed', error_message=error_msg
+                )
+                await self._notify_user(
+                    task.user_id,
+                    f"❌ **Задача пересылки постов остановлена**\n\n{error_msg}"
                 )
                 return
             
@@ -628,144 +662,222 @@ class PostForwarder:
                                 continue
                         
                         
-                        # Try to forward the post
+                        # Try to forward the post — one post = one unit: retry same post with all sessions on session error (like inviting)
                         post_forwarded = False
-                        try:
-                            post_type = f"media group ({len(post_messages)} items)" if is_media_group else "single message"
-                            logger.info(
-                                f"[POST_FORWARDER] Task {task_id}: Processing post "
-                                f"({post_type}, ID: {first_msg.id})"
-                            )
-                            self._log_post_content_preview(task_id, post_messages)
-                            
-                            # Check if native forwarding is enabled
-                            if use_native_forward:
-                                # Native forwarding: check for skip_on_contacts (all messages in post, including media group captions)
-                                skip_on_contacts = getattr(task, 'skip_on_contacts', False)
-                                if skip_on_contacts and self._post_has_contacts(post_messages):
-                                    logger.info(
-                                        f"[POST_FORWARDER] Task {task_id}: Skipped post {first_msg.id} "
-                                        f"(reason: native_forward + skip_on_contacts=True)"
-                                    )
+                        tried_sessions_this_post = []
+                        last_session_error = None
+                        session_idx = current_session_idx
+                        attempt_client = client
+                        attempt_session = session_alias
+                        for _ in range(len(available_sessions)):
+                            if attempt_session in tried_sessions_this_post:
+                                session_idx = (session_idx + 1) % len(available_sessions)
+                                attempt_session = available_sessions[session_idx]
+                                attempt_client = await self._get_client(attempt_session, task.use_proxy)
+                                if not attempt_client:
+                                    tried_sessions_this_post.append(attempt_session)
+                                    last_session_error = f"Не удалось подключить сессию {attempt_session}"
                                     continue
-                                
-                                # Native forwarding mode: use forward_messages
-                                forward_show_source = getattr(task, 'forward_show_source', True)
-                                message_ids = [msg.id for msg in post_messages]
-                                
-                                # Forward messages natively
-                                # Forward messages natively
-                                forwarded_msgs = await client.forward_messages(
-                                    chat_id=task.target_id,
-                                    from_chat_id=task.source_id,
-                                    message_ids=message_ids
-                                )
-                                
-                                post_forwarded = True
+                            try:
+                                post_type = f"media group ({len(post_messages)} items)" if is_media_group else "single message"
                                 logger.info(
-                                    f"[POST_FORWARDER] Task {task_id}: Native forwarded post "
-                                    f"(msg {first_msg.id}, show_source={forward_show_source})"
+                                    f"[POST_FORWARDER] Task {task_id}: Processing post "
+                                    f"({post_type}, ID: {first_msg.id}) session={attempt_session}"
                                 )
-                            else:
-                                # Copy mode: use existing copy logic
-                                if is_media_group:
-                                    await self._forward_media_group(
-                                        client, post_messages, task.target_id,
-                                        task.filter_contacts, task.remove_contacts,
-                                        getattr(task, 'add_signature', False),
-                                        task.source_title,
-                                        getattr(task, 'source_username', None),
-                                        signature_options=getattr(task, 'signature_options', None)
-                                    )
-                                else:
-                                    await self._forward_message(
-                                        client, post_messages[0], task.target_id,
-                                        task.filter_contacts, task.remove_contacts,
-                                        getattr(task, 'add_signature', False),
-                                        task.source_title,
-                                        getattr(task, 'source_username', None),
-                                        signature_options=getattr(task, 'signature_options', None)
-                                    )
+                                self._log_post_content_preview(task_id, post_messages)
                                 
-                                post_forwarded = True
-                            
-                        except FloodWait as e:
-                            logger.warning(f"[POST_FORWARDER] FloodWait: waiting {e.value}s")
-                            await asyncio.sleep(e.value)
-                            # Don't count as forwarded, will retry or skip
-                            
-                        except Exception as e:
-                            err_str = str(e)
-                            # Only try native forward fallback in copy mode
-                            if not use_native_forward and "MEDIA_EMPTY" in err_str:
-                                # Try native forward as fallback
-                                try:
-                                    # Check skip_on_contacts before native forward
+                                if use_native_forward:
                                     skip_on_contacts = getattr(task, 'skip_on_contacts', False)
                                     if skip_on_contacts and self._post_has_contacts(post_messages):
                                         logger.info(
-                                            f"[POST_FORWARDER] Task {task_id}: Skipped post "
-                                            f"(msg {first_msg.id}, причина: MEDIA_EMPTY + skip_on_contacts)"
+                                            f"[POST_FORWARDER] Task {task_id}: Skipped post {first_msg.id} "
+                                            f"(reason: native_forward + skip_on_contacts=True)"
                                         )
-                                        continue
-                                    
-                                    # Use native forward
-                                    forwarded_msgs = await self._forward_native(
-                                        client, post_messages, task.target_id,
-                                        task.remove_contacts
+                                        break
+                                    message_ids = [msg.id for msg in post_messages]
+                                    await attempt_client.forward_messages(
+                                        chat_id=task.target_id,
+                                        from_chat_id=task.source_id,
+                                        message_ids=message_ids
                                     )
-                                    
-                                    if forwarded_msgs:
-                                        post_forwarded = True
-                                        logger.info(
-                                            f"[POST_FORWARDER] Task {task_id}: Used native forward for post "
-                                            f"(msg {first_msg.id}, причина: MEDIA_EMPTY fallback)"
-                                        )
-                                except Exception as fallback_error:
-                                    logger.error(
-                                        f"[POST_FORWARDER] Native forward fallback failed for post "
-                                        f"(msg {first_msg.id}): {fallback_error}"
+                                    post_forwarded = True
+                                    logger.info(
+                                        f"[POST_FORWARDER] Task {task_id}: Native forwarded post "
+                                        f"(msg {first_msg.id})"
                                     )
-                            else:
-                                logger.error(f"[POST_FORWARDER] Error forwarding post (msg {first_msg.id}): {e}")
-                                
-                                # Try to rotate session on error
-                                if task.rotate_sessions and len(available_sessions) > 1:
-                                    # Add failed session to list
-                                    if session_alias not in failed_sessions:
-                                        failed_sessions.append(session_alias)
-                                    
-                                    await self._release_client(session_alias)
-                                    current_session_idx = (current_session_idx + 1) % len(available_sessions)
-                                    session_alias = available_sessions[current_session_idx]
-                                    
-                                    # Check if all sessions failed
-                                    if len(failed_sessions) >= len(available_sessions):
+                                    if attempt_session != session_alias:
+                                        await self._release_client(session_alias)
+                                        session_alias = attempt_session
+                                        client = attempt_client
+                                        current_session_idx = session_idx
                                         await self.db.update_post_parse_task(
-                                            task_id, 
-                                            status='failed',
-                                            error_message="All sessions failed",
-                                            failed_sessions=failed_sessions
+                                            task_id, current_session=session_alias, failed_sessions=failed_sessions
                                         )
-                                        return
-                                    
-                                    client = await self._get_client(session_alias, task.use_proxy)
-                                    if not client:
+                                    break
+                                else:
+                                    if is_media_group:
+                                        await self._forward_media_group(
+                                            attempt_client, post_messages, task.target_id,
+                                            task.filter_contacts, task.remove_contacts,
+                                            getattr(task, 'add_signature', False),
+                                            task.source_title,
+                                            getattr(task, 'source_username', None),
+                                            signature_options=getattr(task, 'signature_options', None)
+                                        )
+                                    else:
+                                        await self._forward_message(
+                                            attempt_client, post_messages[0], task.target_id,
+                                            task.filter_contacts, task.remove_contacts,
+                                            getattr(task, 'add_signature', False),
+                                            task.source_title,
+                                            getattr(task, 'source_username', None),
+                                            signature_options=getattr(task, 'signature_options', None)
+                                        )
+                                    post_forwarded = True
+                                    if attempt_session != session_alias:
+                                        await self._release_client(session_alias)
+                                        session_alias = attempt_session
+                                        client = attempt_client
+                                        current_session_idx = session_idx
                                         await self.db.update_post_parse_task(
-                                            task_id, 
-                                            status='failed',
-                                            error_message=f"Could not connect to session {session_alias}",
-                                            failed_sessions=failed_sessions
+                                            task_id, current_session=session_alias, failed_sessions=failed_sessions
                                         )
-                                        return
-                                    
-                                    # Update current session
+                                    break
+                            except FloodWait as e:
+                                tried_sessions_this_post.append(attempt_session)
+                                last_session_error = f"FloodWait: {e.value}s"
+                                logger.warning(
+                                    f"[POST_FORWARDER] Task {task_id}: FloodWait на сессии {attempt_session} для поста {first_msg.id}, пробуем другую сессию"
+                                )
+                                if attempt_session == session_alias:
+                                    await self._release_client(attempt_session)
+                                if len(tried_sessions_this_post) >= len(available_sessions):
+                                    error_msg = f"Не удалось переслать пост (msg {first_msg.id}). Все сессии: {last_session_error}"
+                                    logger.error(f"[POST_FORWARDER] Task {task_id}: {error_msg}")
                                     await self.db.update_post_parse_task(
-                                        task_id,
-                                        current_session=session_alias,
-                                        failed_sessions=failed_sessions
+                                        task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
                                     )
-                                    logger.info(f"[POST_FORWARDER] Rotated to session {session_alias} after error")
+                                    await self._notify_user(
+                                        task.user_id,
+                                        f"❌ **Задача пересылки постов остановлена**\n\n"
+                                        f"Источник: {getattr(task, 'source_title', '')}\n"
+                                        f"Причина: {error_msg}"
+                                    )
+                                    return
+                                session_idx = (session_idx + 1) % len(available_sessions)
+                                attempt_session = available_sessions[session_idx]
+                                attempt_client = await self._get_client(attempt_session, task.use_proxy)
+                                if not attempt_client:
+                                    tried_sessions_this_post.append(attempt_session)
+                                    last_session_error = f"Сессия {attempt_session} недоступна"
+                                    if len(tried_sessions_this_post) >= len(available_sessions):
+                                        error_msg = f"Не удалось переслать пост (msg {first_msg.id}). {last_session_error}"
+                                        await self.db.update_post_parse_task(
+                                            task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
+                                        )
+                                        await self._notify_user(task.user_id, f"❌ **Задача пересылки постов остановлена**\n\n{error_msg}")
+                                        return
+                                continue
+                            except Exception as e:
+                                err_str = str(e)
+                                if not use_native_forward and "MEDIA_EMPTY" in err_str:
+                                    try:
+                                        skip_on_contacts = getattr(task, 'skip_on_contacts', False)
+                                        if skip_on_contacts and self._post_has_contacts(post_messages):
+                                            logger.info(
+                                                f"[POST_FORWARDER] Task {task_id}: Skipped post (msg {first_msg.id}, MEDIA_EMPTY + skip_on_contacts)"
+                                            )
+                                            break
+                                        forwarded_msgs = await self._forward_native(
+                                            attempt_client, post_messages, task.target_id, task.remove_contacts
+                                        )
+                                        if forwarded_msgs:
+                                            post_forwarded = True
+                                            if attempt_session != session_alias:
+                                                await self._release_client(session_alias)
+                                                session_alias = attempt_session
+                                                client = attempt_client
+                                                current_session_idx = session_idx
+                                                await self.db.update_post_parse_task(
+                                                    task_id, current_session=session_alias, failed_sessions=failed_sessions
+                                                )
+                                            logger.info(
+                                                f"[POST_FORWARDER] Task {task_id}: Used native forward for post (msg {first_msg.id}, MEDIA_EMPTY fallback)"
+                                            )
+                                            break
+                                    except Exception as fallback_err:
+                                        if self._is_session_error(fallback_err):
+                                            tried_sessions_this_post.append(attempt_session)
+                                            last_session_error = str(fallback_err)
+                                            logger.error(
+                                                f"[POST_FORWARDER] Task {task_id}: Fallback native forward failed (session error) для поста {first_msg.id}: {fallback_err}"
+                                            )
+                                            if attempt_session == session_alias:
+                                                await self._release_client(attempt_session)
+                                            if len(tried_sessions_this_post) >= len(available_sessions):
+                                                error_msg = f"Не удалось переслать пост (msg {first_msg.id}). Все сессии: {last_session_error}"
+                                                await self.db.update_post_parse_task(
+                                                    task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
+                                                )
+                                                await self._notify_user(
+                                                    task.user_id,
+                                                    f"❌ **Задача пересылки постов остановлена**\n\n{error_msg}"
+                                                )
+                                                return
+                                            session_idx = (session_idx + 1) % len(available_sessions)
+                                            attempt_session = available_sessions[session_idx]
+                                            attempt_client = await self._get_client(attempt_session, task.use_proxy)
+                                            if not attempt_client:
+                                                tried_sessions_this_post.append(attempt_session)
+                                                if len(tried_sessions_this_post) >= len(available_sessions):
+                                                    await self.db.update_post_parse_task(
+                                                        task_id, status='failed', error_message=last_session_error, failed_sessions=failed_sessions
+                                                    )
+                                                    await self._notify_user(task.user_id, f"❌ **Задача пересылки постов остановлена**\n\n{last_session_error}")
+                                                    return
+                                            continue
+                                        else:
+                                            logger.info(
+                                                f"[POST_FORWARDER] Task {task_id}: Post (msg {first_msg.id}) skipped — MEDIA_EMPTY fallback failed (содержимое поста)"
+                                            )
+                                            break
+                                elif self._is_session_error(e):
+                                    tried_sessions_this_post.append(attempt_session)
+                                    last_session_error = err_str
+                                    logger.error(
+                                        f"[POST_FORWARDER] Task {task_id}: Ошибка сессии при пересылке поста (msg {first_msg.id}): {e}"
+                                    )
+                                    if attempt_session == session_alias:
+                                        await self._release_client(attempt_session)
+                                    if len(tried_sessions_this_post) >= len(available_sessions):
+                                        error_msg = f"Не удалось переслать пост (msg {first_msg.id}). Все сессии дали ошибку: {last_session_error}"
+                                        await self.db.update_post_parse_task(
+                                            task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
+                                        )
+                                        await self._notify_user(
+                                            task.user_id,
+                                            f"❌ **Задача пересылки постов остановлена**\n\n"
+                                            f"Источник: {getattr(task, 'source_title', '')}\n"
+                                            f"Причина: {error_msg}"
+                                        )
+                                        return
+                                    session_idx = (session_idx + 1) % len(available_sessions)
+                                    attempt_session = available_sessions[session_idx]
+                                    attempt_client = await self._get_client(attempt_session, task.use_proxy)
+                                    if not attempt_client:
+                                        tried_sessions_this_post.append(attempt_session)
+                                        if len(tried_sessions_this_post) >= len(available_sessions):
+                                            await self.db.update_post_parse_task(
+                                                task_id, status='failed', error_message=last_session_error or f"Сессия {attempt_session} недоступна", failed_sessions=failed_sessions
+                                            )
+                                            await self._notify_user(task.user_id, f"❌ **Задача пересылки постов остановлена**\n\n{last_session_error or 'Все сессии недоступны'}")
+                                            return
+                                    continue
+                                else:
+                                    logger.info(
+                                        f"[POST_FORWARDER] Task {task_id}: Post (msg {first_msg.id}) пропущен (ошибка не сессии): {e}"
+                                    )
+                                    break
                         
                         # Only count if post was successfully forwarded
                         if post_forwarded:
@@ -813,7 +925,7 @@ class PostForwarder:
                                     )
                                     logger.info(f"[POST_FORWARDER] Rotated to session {session_alias}")
                 
-                # Task completed
+                # Task completed — обновляем статус и уведомляем пользователя (как в инвайтинге)
                 completion_reason = (
                     "limit reached" if task.limit and forwarded_count >= task.limit 
                     else "history exhausted"
@@ -823,6 +935,16 @@ class PostForwarder:
                     f"[POST_FORWARDER] Task {task_id} completed ({completion_reason}). "
                     f"Forwarded {forwarded_count} posts."
                 )
+                task = await self.db.get_post_parse_task(task_id)
+                if task:
+                    await self._notify_user(
+                        task.user_id,
+                        f"✅ **Задача пересылки постов завершена**\n\n"
+                        f"📊 **Итог:** переслано постов: {forwarded_count}\n"
+                        f"📂 Источник: {getattr(task, 'source_title', '')}\n"
+                        f"📂 Причина завершения: {'достигнут лимит' if (task.limit and forwarded_count >= task.limit) else 'история обработана'}\n\n"
+                        f"🎯 Задача выполнена успешно."
+                    )
             
             finally:
                 await self._release_client(session_alias)
@@ -832,10 +954,18 @@ class PostForwarder:
         except Exception as e:
             logger.error(f"[POST_FORWARDER] Task {task_id} failed: {e}")
             await self.db.update_post_parse_task(
-                task_id, 
-                status='failed', 
-                error_message=str(e)
+                task_id, status='failed', error_message=str(e)
             )
+            try:
+                task = await self.db.get_post_parse_task(task_id)
+                if task:
+                    await self._notify_user(
+                        task.user_id,
+                        f"❌ **Задача пересылки постов остановлена**\n\n"
+                        f"Причина: {str(e)}"
+                    )
+            except Exception as notify_err:
+                logger.error(f"[POST_FORWARDER] Failed to send failure notification: {notify_err}")
         finally:
             if task_id in self._parse_tasks:
                 del self._parse_tasks[task_id]
@@ -1154,10 +1284,13 @@ class PostForwarder:
             client = await self._get_client(session_alias, task.use_proxy)
             
             if not client:
+                error_msg = f"Не удалось подключить сессию '{session_alias}'"
                 await self.db.update_post_monitoring_task(
-                    task_id,
-                    status='failed',
-                    error_message=f"Could not connect to session {session_alias}"
+                    task_id, status='failed', error_message=error_msg
+                )
+                await self._notify_user(
+                    task.user_id,
+                    f"❌ **Задача мониторинга постов остановлена**\n\n{error_msg}"
                 )
                 return
             
@@ -1393,11 +1526,16 @@ class PostForwarder:
                             
                             # Check if all sessions failed
                             if len(failed_sessions) >= len(available_sessions):
+                                error_msg = "Все сессии дали ошибку при пересылке"
                                 await self.db.update_post_monitoring_task(
                                     task_id,
                                     status='failed',
-                                    error_message="All sessions failed",
+                                    error_message=error_msg,
                                     failed_sessions=failed_sessions
+                                )
+                                await self._notify_user(
+                                    task.user_id,
+                                    f"❌ **Задача мониторинга постов остановлена**\n\n{error_msg}"
                                 )
                                 self._stop_flags[task_id] = True
                                 return
@@ -1628,11 +1766,16 @@ class PostForwarder:
                             
                             # Check if all sessions failed
                             if len(failed_sessions) >= len(available_sessions):
+                                error_msg = "Все сессии дали ошибку при пересылке"
                                 await self.db.update_post_monitoring_task(
                                     task_id,
                                     status='failed',
-                                    error_message="All sessions failed",
+                                    error_message=error_msg,
                                     failed_sessions=failed_sessions
+                                )
+                                await self._notify_user(
+                                    task.user_id,
+                                    f"❌ **Задача мониторинга постов остановлена**\n\n{error_msg}"
                                 )
                                 self._stop_flags[task_id] = True
                                 return
@@ -1666,19 +1809,38 @@ class PostForwarder:
             for timer in media_group_timers.values():
                 timer.cancel()
             
-            # Completed
-            await self.db.update_post_monitoring_task(task_id, status='completed')
-            logger.info(f"[POST_FORWARDER] Monitoring task {task_id} completed")
+            # Completed (лимит достигнут) — обновляем статус и уведомляем; при остановке пользователем статус уже paused
+            if task.limit and forwarded_count >= task.limit:
+                await self.db.update_post_monitoring_task(task_id, status='completed')
+                logger.info(f"[POST_FORWARDER] Monitoring task {task_id} completed (limit reached)")
+                mon_task = await self.db.get_post_monitoring_task(task_id)
+                if mon_task:
+                    await self._notify_user(
+                        mon_task.user_id,
+                        f"✅ **Задача мониторинга постов завершена**\n\n"
+                        f"📊 Переслано постов: {forwarded_count}\n"
+                        f"📂 Источник: {getattr(mon_task, 'source_title', '')}\n\n"
+                        f"🎯 Достигнут лимит постов."
+                    )
+            else:
+                logger.info(f"[POST_FORWARDER] Monitoring task {task_id} stopped (paused or cancelled)")
         
         except asyncio.CancelledError:
             logger.info(f"[POST_FORWARDER] Monitoring task {task_id} cancelled")
         except Exception as e:
             logger.error(f"[POST_FORWARDER] Monitoring task {task_id} failed: {e}")
             await self.db.update_post_monitoring_task(
-                task_id,
-                status='failed',
-                error_message=str(e)
+                task_id, status='failed', error_message=str(e)
             )
+            try:
+                mon_task = await self.db.get_post_monitoring_task(task_id)
+                if mon_task:
+                    await self._notify_user(
+                        mon_task.user_id,
+                        f"❌ **Задача мониторинга постов остановлена**\n\nПричина: {str(e)}"
+                    )
+            except Exception as notify_err:
+                logger.error(f"[POST_FORWARDER] Failed to send monitoring failure notification: {notify_err}")
         finally:
             # Cleanup
             if task_id in self._monitoring_handlers:
