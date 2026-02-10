@@ -5616,19 +5616,24 @@ async def handle_invite_settings_from_status(client: Client, callback_query):
     user_id = int(callback_query.from_user.id)
     task_id = int(callback_query.data.split(":")[1])
     
-    # Get task details
+    # Get task details (API returns flat object, no "task" key)
     result = await api_client.get_task(task_id)
     if not result.get('success'):
         await callback_query.answer("❌ Не удалось загрузить задачу", show_alert=True)
         return
 
-    task = result.get('task', {})
+    task = result.get('task') or result
     
     # Stop task if running
     if task.get('status') == 'running':
         await callback_query.answer("⏸️ Приостановка задачи...")
         await api_client.stop_task(task_id)
         task['status'] = 'paused'
+    
+    # Normalize available_sessions to list (API may return list or comma-separated string)
+    raw_sessions = task.get('available_sessions') or []
+    if isinstance(raw_sessions, str):
+        raw_sessions = [s.strip() for s in raw_sessions.split(',') if s.strip()]
     
     # Populate user state
     user_states[user_id] = {} # Clear previous state
@@ -5643,8 +5648,8 @@ async def handle_invite_settings_from_status(client: Client, callback_query):
         'rotate_sessions': task.get('rotate_sessions', False),
         'rotate_every': task.get('rotate_every', 0),
         'use_proxy': task.get('use_proxy', True),
-        'available_sessions': task.get('available_sessions', []),
-        'selected_sessions': task.get('available_sessions', []), # For consistency in UI
+        'available_sessions': raw_sessions,
+        'selected_sessions': raw_sessions,
         'filter_mode': task.get('filter_mode', 'all'),
         'inactive_threshold_days': task.get('inactive_threshold_days'),
         'invite_mode': task.get('invite_mode', 'member_list')
@@ -5652,13 +5657,13 @@ async def handle_invite_settings_from_status(client: Client, callback_query):
     
     user_states[user_id]['invite_settings'] = settings
     
-    # Populate source/target for display context
+    # Populate source/target for display context (API may use source_group/target_group or source_group_title/target_group_title)
     user_states[user_id]['source_group'] = {
-        'title': task.get('source_group_title', 'N/A'),
+        'title': task.get('source_group_title') or task.get('source_group', 'N/A'),
         'id': task.get('source_group_id')
     }
     user_states[user_id]['target_group'] = {
-        'title': task.get('target_group_title', 'N/A'),
+        'title': task.get('target_group_title') or task.get('target_group', 'N/A'),
         'id': task.get('target_group_id')
     }
     if task.get('file_source'):
