@@ -634,6 +634,47 @@ async def text_handler(client: Client, message: Message):
     await show_main_menu(client, message)
 
 
+async def resolve_group_with_rotation(normalized: str, sessions: list, assignments: dict, task_type: str = 'inviting') -> tuple:
+    """
+    Попытаться разрешить группу через разные сессии (ротация).
+    
+    Args:
+        normalized: Нормализованный ввод группы (ID, username, link)
+        sessions: Список всех сессий
+        assignments: Назначения сессий на задачи
+        task_type: Тип задачи для выбора приоритетных сессий ('inviting' или 'parsing')
+        
+    Returns:
+        tuple: (group_info, last_error, failed_sessions_info)
+    """
+    # Сначала пробуем назначенные сессии
+    priority_sessions = assignments.get(task_type, [])
+    # Затем все остальные активные сессии
+    other_sessions = [s['alias'] for s in sessions if s['is_active'] and s['alias'] not in priority_sessions]
+    
+    candidates = priority_sessions + other_sessions
+    
+    if not candidates:
+        return None, "Нет активных сессий", ["• Нет доступных сессий для выполнения этой операции"]
+    
+    group_info = None
+    last_error = None
+    failed_sessions = []
+    
+    for session_alias in candidates:
+        group_info = await api_client.get_group_info(session_alias, normalized)
+        
+        if group_info.get('success'):
+            logger.info(f"[{task_type.upper()}] Resolved {normalized} using session {session_alias}")
+            return group_info, None, []
+        else:
+            last_error = group_info.get('error', 'Неизвестная ошибка')
+            failed_sessions.append(f"• {session_alias}: {last_error}")
+            logger.warning(f"[{task_type.upper()}] Session {session_alias} failed to resolve {normalized}: {last_error}")
+            
+    return None, last_error, failed_sessions
+
+
 async def start_invite_flow(client: Client, message: Message):
     """Start the invite flow - ask for source group."""
     user_id = message.from_user.id
@@ -718,46 +759,25 @@ async def handle_source_group_input(client: Client, message: Message, text: str)
         # User input - need to resolve
         normalized = normalize_group_input(text)
         
-        # Get first available session for resolving
+        # Get available sessions for rotation
         sessions_result = await api_client.list_sessions()
         sessions = sessions_result.get('sessions', [])
         assignments = sessions_result.get('assignments', {})
         
-        # Prefer inviting sessions
-        inviting_sessions = assignments.get('inviting', [])
-        session_alias = inviting_sessions[0] if inviting_sessions else (
-            sessions[0]['alias'] if sessions else None
-        )
+        # Resolve group with rotation
+        group_info, last_error, failed_sessions = await resolve_group_with_rotation(normalized, sessions, assignments, 'inviting')
         
-        if not session_alias:
+        if not group_info:
+            # All sessions failed - show detailed error
+            error_details = "\n".join(failed_sessions) if failed_sessions else "Неизвестная ошибка"
+            error_msg = format_session_error_message(last_error)
+            
             await message.reply(
-                "❌ Нет доступных сессий для проверки группы.\n"
-                "Добавьте сессию в меню 🔐 Сессии"
+                f"{error_msg}\n\n"
+                f"**Проблемы с сессиями ({len(failed_sessions)}):**\n"
+                f"{error_details}\n\n"
+                "Проверьте настройки сессий или попробуйте другую группу."
             )
-            return
-        
-        # Resolve group
-        group_info = await api_client.get_group_info(session_alias, normalized)
-        
-        if not group_info.get('success') or not group_info.get('id'):
-            error_detail = group_info.get('error', 'Неизвестная ошибка')
-            if 'Session not available' in str(error_detail):
-                await message.reply(
-                    f"❌ **Сессия `{session_alias}` недоступна**\\n\\n"
-                    "Возможные причины:\\n"
-                    "• Сессия не авторизована\\n"
-                    "• Сессия заблокирована\\n"
-                    "• Неверные API credentials\\n\\n"
-                    "Назначьте рабочую сессию на инвайтинг в меню 🔐 **Сессии**\\n\\n"
-                    "Отправьте /start чтобы вернуться в главное меню",
-                    reply_markup=get_main_keyboard()
-                )
-                user_states[user_id] = {"state": FSM_MAIN_MENU}
-            else:
-                await message.reply(
-                    "❌ Не удалось найти группу. Проверьте ссылку или ID.\\n"
-                    "Попробуйте еще раз или отправьте /start для возврата в меню:"
-                )
             return
         
         group_id = str(group_info['id'])
@@ -813,41 +833,20 @@ async def handle_target_group_input(client: Client, message: Message, text: str)
         sessions = sessions_result.get('sessions', [])
         assignments = sessions_result.get('assignments', {})
         
-        inviting_sessions = assignments.get('inviting', [])
-        session_alias = inviting_sessions[0] if inviting_sessions else (
-            sessions[0]['alias'] if sessions else None
-        )
+        # Resolve group with rotation
+        group_info, last_error, failed_sessions = await resolve_group_with_rotation(normalized, sessions, assignments, 'inviting')
         
-        if not session_alias:
+        if not group_info:
+            # All sessions failed - show detailed error
+            error_details = "\n".join(failed_sessions) if failed_sessions else "Неизвестная ошибка"
+            error_msg = format_session_error_message(last_error)
+            
             await message.reply(
-                "❌ Нет доступных сессий для проверки группы.\\n"
-                "Добавьте сессию в меню 🔐 Сессии",
-                reply_markup=get_main_keyboard()
+                f"{error_msg}\n\n"
+                f"**Проблемы с сессиями ({len(failed_sessions)}):**\n"
+                f"{error_details}\n\n"
+                "Проверьте настройки сессий или попробуйте другую группу."
             )
-            user_states[user_id] = {"state": FSM_MAIN_MENU}
-            return
-        
-        group_info = await api_client.get_group_info(session_alias, normalized)
-        
-        if not group_info.get('success') or not group_info.get('id'):
-            error_detail = group_info.get('error', 'Неизвестная ошибка')
-            if 'Session not available' in str(error_detail):
-                await message.reply(
-                    f"❌ **Сессия `{session_alias}` недоступна**\\n\\n"
-                    "Возможные причины:\\n"
-                    "• Сессия не авторизована\\n"
-                    "• Сессия заблокирована\\n"
-                    "• Неверные API credentials\\n\\n"
-                    "Назначьте рабочую сессию на инвайтинг в меню 🔐 **Сессии**\\n\\n"
-                    "Отправьте /start чтобы вернуться в главное меню",
-                    reply_markup=get_main_keyboard()
-                )
-                user_states[user_id] = {"state": FSM_MAIN_MENU}
-            else:
-                await message.reply(
-                    "❌ Не удалось найти группу. Проверьте ссылку или ID.\\n"
-                    "Попробуйте еще раз или отправьте /start для возврата в меню:"
-                )
             return
         
         group_id = str(group_info['id'])
@@ -3181,48 +3180,25 @@ async def handle_parse_source_group_input(client: Client, message: Message, text
     else:
         normalized = normalize_group_input(text)
         
-        # Get sessions - prefer parsing-assigned sessions
+        # Get sessions
         sessions_result = await api_client.list_sessions()
         sessions = sessions_result.get('sessions', [])
         assignments = sessions_result.get('assignments', {})
         
-        # Prefer parsing sessions, then any available session
-        parsing_sessions = assignments.get('parsing', [])
-        session_alias = parsing_sessions[0] if parsing_sessions else (
-            sessions[0]['alias'] if sessions else None
-        )
+        # Resolve group with rotation
+        group_info, last_error, failed_sessions = await resolve_group_with_rotation(normalized, sessions, assignments, 'parsing')
         
-        if not session_alias:
+        if not group_info:
+            # All sessions failed - show detailed error
+            error_details = "\n".join(failed_sessions) if failed_sessions else "Неизвестная ошибка"
+            error_msg = format_session_error_message(last_error)
+            
             await message.reply(
-                "❌ Нет доступных сессий для проверки группы.\\n"
-                "Добавьте сессию в меню 🔐 Сессии",
-                reply_markup=get_main_keyboard()
+                f"{error_msg}\n\n"
+                f"**Проблемы с сессиями ({len(failed_sessions)}):**\n"
+                f"{error_details}\n\n"
+                "Проверьте настройки сессий или попробуйте другую группу."
             )
-            user_states[user_id] = {"state": FSM_MAIN_MENU}
-            return
-        
-        # Resolve group
-        group_info = await api_client.get_group_info(session_alias, normalized)
-        
-        if not group_info.get('success') or not group_info.get('id'):
-            error_detail = group_info.get('error', 'Неизвестная ошибка')
-            if 'Session not available' in str(error_detail):
-                await message.reply(
-                    f"❌ **Сессия `{session_alias}` недоступна**\\n\\n"
-                    "Возможные причины:\\n"
-                    "• Сессия не авторизована\\n"
-                    "• Сессия заблокирована\\n"
-                    "• Неверные API credentials\\n\\n"
-                    "Назначьте рабочую сессию на парсинг в меню 🔐 **Сессии**\\n\\n"
-                    "Отправьте /start чтобы вернуться в главное меню",
-                    reply_markup=get_main_keyboard()
-                )
-                user_states[user_id] = {"state": FSM_MAIN_MENU}
-            else:
-                await message.reply(
-                    "❌ Не удалось найти группу. Проверьте ссылку или ID.\\n"
-                    "Попробуйте еще раз или отправьте /start для возврата в меню:"
-                )
             return
         
         group_id = str(group_info['id'])
@@ -3612,29 +3588,24 @@ async def handle_invite_from_file_target_input(client: Client, message: Message,
     else:
         normalized = normalize_group_input(text)
         
-        # Get session for resolving
+        # Get available sessions for rotation
         sessions_result = await api_client.list_sessions()
         sessions = sessions_result.get('sessions', [])
         assignments = sessions_result.get('assignments', {})
         
-        inviting_sessions = assignments.get('inviting', [])
-        session_alias = inviting_sessions[0] if inviting_sessions else (
-            sessions[0]['alias'] if sessions else None
-        )
+        # Resolve group with rotation
+        group_info, last_error, failed_sessions = await resolve_group_with_rotation(normalized, sessions, assignments, 'inviting')
         
-        if not session_alias:
+        if not group_info:
+            # All sessions failed - show detailed error
+            error_details = "\n".join(failed_sessions) if failed_sessions else "Неизвестная ошибка"
+            error_msg = format_session_error_message(last_error)
+            
             await message.reply(
-                "❌ Нет доступных сессий для проверки группы.\n"
-                "Добавьте сессию в меню 🔐 Сессии"
-            )
-            return
-        
-        group_info = await api_client.get_group_info(session_alias, normalized)
-        
-        if not group_info.get('success') or not group_info.get('id'):
-            await message.reply(
-                "❌ Не удалось найти группу. Проверьте ссылку или ID.\n"
-                "Попробуйте еще раз:"
+                f"{error_msg}\n\n"
+                f"**Проблемы с сессиями ({len(failed_sessions)}):**\n"
+                f"{error_details}\n\n"
+                "Проверьте настройки сессий или попробуйте другую группу."
             )
             return
         

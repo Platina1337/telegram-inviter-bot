@@ -82,8 +82,17 @@ class APIClient:
             response = await client.request(method, url, **kwargs)
             
             if response.status_code >= 400:
-                logger.error(f"API error: {response.status_code} - {response.text}")
-                return {"success": False, "error": f"HTTP {response.status_code}"}
+                try:
+                    data = response.json()
+                    detail = data.get("detail") or data.get("error") or response.text
+                except Exception:
+                    detail = response.text
+                logger.error(f"API error: {response.status_code} - {detail}")
+                return {
+                    "success": False, 
+                    "error": str(detail),
+                    "status_code": response.status_code
+                }
             
             return response.json()
         except httpx.TimeoutException:

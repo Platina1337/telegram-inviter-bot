@@ -1514,14 +1514,15 @@ def format_session_error_message(error: str, session_alias: str = None) -> str:
     """Format user-friendly error message for session issues."""
     error_lower = error.lower() if error else ""
     
-    if "клиент недоступен" in error_lower or "client unavailable" in error_lower:
+    if ("клиент недоступен" in error_lower or "client unavailable" in error_lower
+            or "session not available" in error_lower or "session_revoked" in error_lower):
         session_info = f" ({session_alias})" if session_alias else ""
         return (
             f"❌ **Сессия недоступна{session_info}**\n\n"
             "Возможные причины:\n"
             "• Сессия отключена или заблокирована\n"
             "• Проблемы с авторизацией\n"
-            "• Сессия требует повторного входа\n\n"
+            "• Сессия требует повторного входа (все сессии завершены в Telegram)\n\n"
             "Проверьте сессию в меню 🔐 **Сессии**"
         )
     

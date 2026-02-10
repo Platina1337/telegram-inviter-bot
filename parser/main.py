@@ -620,12 +620,13 @@ async def get_group_info(session_alias: str, group_input: str):
     # Проверяем наличие сессии в БД (на хосте сессии могут быть не импортированы)
     session_meta = await db.get_session_by_alias(session_alias)
     if not session_meta:
-        logger.warning(f"GET /groups/{session_alias}/info: сессия не найдена в БД (нет файла в sessions/ или другой БД)")
-        raise HTTPException(status_code=404, detail="Session not found. Add session on parser host or copy sessions folder and DB.")
+        logger.warning(f"GET /groups/{session_alias}/info: сессия не найдена в БД")
+        return {"success": False, "error": "Session not found in DB"}
+        
     client = await session_manager.get_client(session_alias)
     if not client:
         logger.warning(f"GET /groups/{session_alias}/info: сессия в БД есть, но клиент недоступен (не удалось запустить)")
-        raise HTTPException(status_code=503, detail="Session not available (client failed to start). Check session file and auth on parser host.")
+        return {"success": False, "error": "Session not available (client failed to start)"}
     
     try:
         # Handle different input formats
