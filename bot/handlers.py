@@ -4693,7 +4693,7 @@ async def handle_post_forward_callback(client: Client, callback_query):
     if data == "pf_sig_include_post":
         settings = user_states[user_id].get('post_forward_settings', {})
         opts = settings.get('signature_options') or get_default_signature_options()
-        opts['include_post'] = not opts.get('include_post', True)
+        opts['include_post'] = not opts.get('include_post', False)
         settings['signature_options'] = opts
         user_states[user_id]['post_forward_settings'] = settings
         await callback_query.message.edit_text(

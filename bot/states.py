@@ -1424,9 +1424,9 @@ def get_post_forward_settings_keyboard(current_settings: Dict = None, mode: str 
 
 
 def get_default_signature_options() -> Dict:
-    """Default options when enabling signature."""
+    """Default options when enabling signature. By default only link to author is enabled."""
     return {
-        'include_post': True,
+        'include_post': False,
         'include_source': False,
         'include_author': True,
         'label_post': 'Ссылка на пост',
@@ -1438,7 +1438,7 @@ def get_default_signature_options() -> Dict:
 def get_signature_options_keyboard(settings: Dict) -> InlineKeyboardMarkup:
     """Keyboard for signature options sub-menu."""
     opts = settings.get('signature_options') or get_default_signature_options()
-    inc_post = opts.get('include_post', True)
+    inc_post = opts.get('include_post', False)
     inc_src = opts.get('include_source', False)
     inc_author = opts.get('include_author', True)
     label_post = (opts.get('label_post') or opts.get('label_source') or 'Ссылка на пост')[:25]

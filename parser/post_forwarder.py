@@ -255,7 +255,7 @@ class PostForwarder:
         Backward compat: if label_post missing, label_source is used for post line.
         """
         opts = signature_options or {}
-        include_post = opts.get('include_post', True)
+        include_post = opts.get('include_post', False)
         include_source = opts.get('include_source', False)
         include_author = opts.get('include_author', True)
         label_post = (opts.get('label_post') or opts.get('label_source') or 'Ссылка на пост').strip()
