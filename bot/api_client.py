@@ -292,7 +292,9 @@ class APIClient:
     async def update_task(self, task_id: int, delay_seconds: int = None, delay_every: int = None,
                           limit: int = None, rotate_sessions: bool = None, rotate_every: int = None,
                           use_proxy: bool = None,
-                          available_sessions: List[str] = None) -> Dict[str, Any]:
+                          available_sessions: List[str] = None,
+                          filter_mode: str = None,
+                          inactive_threshold_days: int = None) -> Dict[str, Any]:
         """Update task settings."""
         data = {}
         if delay_seconds is not None:
@@ -309,6 +311,10 @@ class APIClient:
             data['use_proxy'] = use_proxy
         if available_sessions is not None:
             data['available_sessions'] = available_sessions
+        if filter_mode is not None:
+            data['filter_mode'] = filter_mode
+        if inactive_threshold_days is not None:
+            data['inactive_threshold_days'] = inactive_threshold_days
         
         return await self._make_request("PUT", f"/tasks/{task_id}", json=data)
     

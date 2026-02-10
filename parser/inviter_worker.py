@@ -32,18 +32,62 @@ class InviterWorker:
     
     async def start_invite_task(self, task_id: int) -> Dict[str, Any]:
         """Start an invite task."""
+        import json
+
         task = await self.db.get_invite_task(task_id)
         if not task:
             return {"success": False, "error": "Task not found"}
-        # Если текущая сессия больше не в списке выбранных (настройки сменили) — переключаем на первую из списка
-        if task.available_sessions and task.session_alias not in task.available_sessions:
-            await self.db.update_invite_task(
-                task_id,
-                session_alias=task.available_sessions[0],
-                current_session=task.available_sessions[0]
-            )
-            task = await self.db.get_invite_task(task_id)
         
+        # Validate sessions first
+        logger.info(f"Validating sessions for task {task_id}...")
+        validation_result = await self.session_manager.validate_sessions_for_task('invite', task)
+        valid_sessions = validation_result['valid']
+        validation_errors = validation_result['invalid']
+        
+        # Update validation results in DB
+        await self.db.update_invite_task(
+            task_id, 
+            validated_sessions=valid_sessions,
+            validation_errors=json.dumps(validation_errors) if validation_errors else None
+        )
+        
+        if not valid_sessions:
+            logger.error(f"Task {task_id} failed validation: No valid sessions. Errors: {validation_errors}")
+            # Ensure we mark it as failed so user sees it
+            await self.db.update_invite_task(task_id, status='failed', error_message="No valid sessions found during pre-check.")
+            return {
+                "success": False, 
+                "error": "No valid sessions found. Check validation errors.", 
+                "validation_errors": validation_errors
+            }
+
+        # Update task object with new data
+        task.validated_sessions = valid_sessions
+        task.validation_errors = validation_errors
+
+        # If current session is not valid, switch to first valid
+        if task.available_sessions and task.session_alias not in valid_sessions:
+            if valid_sessions:
+                new_session = valid_sessions[0]
+                logger.info(f"Switching task {task_id} to valid session: {new_session}")
+                await self.db.update_invite_task(
+                    task_id,
+                    session_alias=new_session,
+                    current_session=new_session
+                )
+                # Reload task
+                task = await self.db.get_invite_task(task_id)
+            else:
+                # Should be caught by 'not valid_sessions' check above, but for safety
+                return {"success": False, "error": "No valid sessions available to switch to."}
+
+        # Also fallback for manual available_sessions change (existing logic)
+        elif task.available_sessions and task.session_alias not in task.available_sessions:
+             # If current alias is valid (in valid_sessions) but strict available_sessions changed?
+             # Usually available_sessions IS what we validated against.
+             # So if alias is in valid_sessions, it MUST be in available_sessions (checking logic uses available_sessions).,
+             pass 
+
         if task_id in self.running_tasks and not self.running_tasks[task_id].done():
             return {"success": False, "error": "Task is already running"}
         
@@ -82,7 +126,7 @@ class InviterWorker:
         import time
         now = time.time()
         last = self._last_heartbeat.get(task_id, 0)
-        if now - last >= 60:  # Update every 60 seconds minimum
+        if now - last >= 20:  # Update every 20 seconds
             await self.db.update_invite_task(task_id, last_heartbeat=datetime.now().isoformat())
             self._last_heartbeat[task_id] = now
             return True
@@ -234,6 +278,12 @@ class InviterWorker:
                 if not task:
                     logger.error(f"Задача {task_id} не найдена")
                     break
+                
+                # Update heartbeat and phase
+                await self._update_heartbeat_if_needed(task_id)
+                if task.worker_phase != 'inviting':
+                    await self.db.update_invite_task(task_id, worker_phase='inviting')
+                    task.worker_phase = 'inviting'
                 
                 # Check if limit reached
                 if task.limit and task.invited_count >= task.limit:
@@ -564,9 +614,11 @@ class InviterWorker:
                             actual_delay = random.randint(min_delay, max_delay)
                             
                             logger.info(f"Задача {task_id}: Ожидание {actual_delay}с после {task.delay_every} приглашений (базовая задержка: {task.delay_seconds}с)")
+                            await self.db.update_invite_task(task_id, worker_phase='sleeping')
                             await asyncio.sleep(actual_delay)
                         else:
                             # Small fixed delay between invites if no major delay is scheduled
+                            await self.db.update_invite_task(task_id, worker_phase='sleeping')
                             await asyncio.sleep(random.randint(2, 5))
                     
                     elif result.get('flood_wait'):
@@ -583,6 +635,7 @@ class InviterWorker:
                                 break
                         
                         # Wait out the flood
+                        await self.db.update_invite_task(task_id, worker_phase='sleeping')
                         await asyncio.sleep(min(wait_time, 300))
                     
                     elif result.get('fatal'):
@@ -927,6 +980,12 @@ class InviterWorker:
             
             try:
                 async for message in client.get_chat_history(task.source_group_id):
+                    # Update heartbeat and phase
+                    await self._update_heartbeat_if_needed(task_id)
+                    if task.worker_phase != 'inviting':
+                        await self.db.update_invite_task(task_id, worker_phase='inviting')
+                        task.worker_phase = 'inviting'
+
                     # Check stop flag
                     if self._stop_flags.get(task_id, False):
                         logger.info(f"Задача {task_id}: Установлен флаг остановки, прерывание")
@@ -1080,8 +1139,10 @@ class InviterWorker:
                             actual_delay = random.randint(min_delay, max_delay)
                             
                             logger.info(f"Задача {task_id}: Ожидание {actual_delay}с после {task.delay_every} приглашений")
+                            await self.db.update_invite_task(task_id, worker_phase='sleeping')
                             await asyncio.sleep(actual_delay)
                         else:
+                            await self.db.update_invite_task(task_id, worker_phase='sleeping')
                             await asyncio.sleep(random.randint(2, 5))
                     
                     elif result.get('flood_wait'):
@@ -1098,6 +1159,7 @@ class InviterWorker:
                                 continue
                         
                         # Wait out the flood
+                        await self.db.update_invite_task(task_id, worker_phase='sleeping')
                         await asyncio.sleep(min(wait_time, 300))
                     
                     elif result.get('fatal'):
@@ -1300,10 +1362,12 @@ class InviterWorker:
         logger.info(f"🔄 SESSION ROTATION: Task {task.id} - Groups: source={task.source_group_id}, target={task.target_group_id}")
 
         # Фильтруем пустые строки из available_sessions
-        available_sessions = [s for s in task.available_sessions if s]
+        # Per TZ: Use validated_sessions for rotation if available
+        candidates = task.validated_sessions if task.validated_sessions else task.available_sessions
+        available_sessions = [s for s in candidates if s]
         
         if not available_sessions:
-            logger.error(f"🔄 SESSION ROTATION: Task {task.id} - FAILED: No available sessions for rotation (available_sessions is empty or contains only empty strings)")
+            logger.error(f"🔄 SESSION ROTATION: Task {task.id} - FAILED: No validated sessions for rotation")
             return None
 
         if len(available_sessions) == 1:
@@ -1410,7 +1474,11 @@ class InviterWorker:
             "inactive_threshold_days": task.inactive_threshold_days,
             "file_source": task.file_source,
             "last_action_time": task.last_action_time,
-            "current_session": task.current_session
+            "current_session": task.current_session,
+            "last_heartbeat": task.last_heartbeat,
+            "worker_phase": task.worker_phase,
+            "validated_sessions": task.validated_sessions,
+            "validation_errors": task.validation_errors
         }
     
     async def get_all_running_tasks(self) -> list:
@@ -1486,6 +1554,12 @@ class InviterWorker:
                 if not task:
                     logger.error(f"Задача {task_id} не найдена")
                     break
+                
+                # Update heartbeat and phase
+                await self._update_heartbeat_if_needed(task_id)
+                if task.worker_phase != 'inviting':
+                    await self.db.update_invite_task(task_id, worker_phase='inviting')
+                    task.worker_phase = 'inviting'
                 
                 # Check if limit reached
                 if task.limit and task.invited_count >= task.limit:
@@ -1573,6 +1647,7 @@ class InviterWorker:
                                     first_name=user_first_name,
                                     status=status_code
                                 )
+                                await self.db.update_invite_task(task_id, worker_phase='sleeping')
                                 await asyncio.sleep(0.1)
                                 continue
                         except Exception:
@@ -1640,8 +1715,10 @@ class InviterWorker:
                             actual_delay = random.randint(min_delay, max_delay)
                             
                             logger.info(f"Задача {task_id}: Ожидание {actual_delay}с после {task.delay_every} приглашений")
+                            await self.db.update_invite_task(task_id, worker_phase='sleeping')
                             await asyncio.sleep(actual_delay)
                         else:
+                            await self.db.update_invite_task(task_id, worker_phase='sleeping')
                             await asyncio.sleep(random.randint(2, 5))
                     
                     elif result.get('flood_wait'):
@@ -1656,6 +1733,8 @@ class InviterWorker:
                                 session_consecutive_invites = 0
                                 break
                         
+                        
+                        await self.db.update_invite_task(task_id, worker_phase='sleeping')
                         await asyncio.sleep(min(wait_time, 300))
                     
                     elif result.get('fatal'):

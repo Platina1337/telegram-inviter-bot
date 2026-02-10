@@ -43,6 +43,7 @@ from bot.states import (
     get_file_manager_list_keyboard, get_file_actions_keyboard, get_file_filter_keyboard, format_file_stats,
     get_filename_by_index,
     parse_group_button, normalize_group_input, format_group_button,
+    get_full_group_title_from_history,
     format_invite_status, format_parse_status,
     # Post Forwarding keyboards and formatters
     get_post_forward_main_keyboard, get_post_forward_source_type_keyboard,
@@ -708,10 +709,11 @@ async def handle_source_group_input(client: Client, message: Message, text: str)
     group_data = parse_group_button(text)
     
     if group_data:
-        # From button
+        # From button — restore full title from history (button text is truncated)
         group_id = group_data['id']
-        group_title = group_data['title']
-        username = group_data.get('username')
+        full_title, full_username = await get_full_group_title_from_history(user_id, group_id, is_target=False)
+        group_title = full_title or group_data['title']
+        username = full_username if full_username is not None else group_data.get('username')
     else:
         # User input - need to resolve
         normalized = normalize_group_input(text)
@@ -798,9 +800,11 @@ async def handle_target_group_input(client: Client, message: Message, text: str)
     group_data = parse_group_button(text)
     
     if group_data:
+        # From button — restore full title from history (button text is truncated)
         group_id = group_data['id']
-        group_title = group_data['title']
-        username = group_data.get('username')
+        full_title, full_username = await get_full_group_title_from_history(user_id, group_id, is_target=True)
+        group_title = full_title or group_data['title']
+        username = full_username if full_username is not None else group_data.get('username')
     else:
         normalized = normalize_group_input(text)
         
@@ -949,7 +953,7 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
         return
     
     # Pagination settings
-    tasks_per_page = 5
+    tasks_per_page = 20
     total_pages = (len(tasks) + tasks_per_page - 1) // tasks_per_page
     page = max(0, min(page, total_pages - 1))  # Ensure page is in valid range
     
@@ -1161,6 +1165,30 @@ async def callback_handler(client: Client, callback_query):
     
     # ============== Invite Menu ==============
     
+    if data.startswith("invite_settings_from_status:"):
+        await handle_invite_settings_from_status(client, callback_query)
+        return
+        
+    if data.startswith("parse_settings_from_status:"):
+        await handle_parse_settings_from_status(client, callback_query)
+        return
+
+    if data == "invite_settings_save":
+        await handle_invite_settings_save(client, callback_query)
+        return
+        
+    if data == "invite_settings_cancel":
+        await handle_invite_settings_cancel(client, callback_query)
+        return
+
+    if data == "parse_settings_save":
+        await handle_parse_settings_save(client, callback_query)
+        return
+        
+    if data == "parse_settings_cancel":
+        await handle_parse_settings_cancel(client, callback_query)
+        return
+
     if data.startswith("invite_start:"):
         await handle_invite_start(client, callback_query)
         return
@@ -2607,20 +2635,11 @@ async def handle_invite_status(client: Client, callback_query, task_id: int = No
         await callback_query.answer(f"Ошибка: {task_data.get('error')}", show_alert=True)
         return
     
-    # Auto-pause when opening details so user can change settings safely
-    paused_msg = None
-    if task_data.get('status') == 'running':
-        stop_result = await api_client.stop_task(task_id)
-        if stop_result.get('success'):
-            task_data = await api_client.get_task(task_id)
-            if task_data.get('success'):
-                paused_msg = "⏸️ Задача приостановлена (открытие деталей)"
-    
     text = format_invite_status(task_data)
     status = task_data.get('status', 'pending')
     kb = get_invite_running_keyboard(task_id) if status == 'running' else get_invite_paused_keyboard(task_id)
     await callback_query.edit_message_text(text, reply_markup=kb)
-    await callback_query.answer(paused_msg or None)
+    await callback_query.answer()
 
 
 async def handle_parse_refresh(client: Client, callback_query):
@@ -2729,19 +2748,11 @@ async def handle_parse_status(client: Client, callback_query, task_id: int = Non
         return
     
     task = task_data.get('task', {})
-    paused_msg = None
-    if task.get('status') == 'running':
-        stop_result = await api_client.stop_parse_task(task_id)
-        if stop_result.get('success'):
-            task_data = await api_client.get_parse_task(task_id)
-            if task_data.get('success'):
-                task = task_data.get('task', {})
-                paused_msg = "⏸️ Задача приостановлена (открытие деталей)"
     
     text = format_parse_status(task)
     kb = get_parse_running_keyboard(task_id) if task.get('status') == 'running' else get_parse_paused_keyboard(task_id)
     await callback_query.edit_message_text(text, reply_markup=kb)
-    await callback_query.answer(paused_msg or None)
+    await callback_query.answer()
 
 
 async def handle_invite_refresh(client: Client, callback_query):
@@ -3162,9 +3173,11 @@ async def handle_parse_source_group_input(client: Client, message: Message, text
     group_data = parse_group_button(text)
     
     if group_data:
+        # From button — restore full title from history (button text is truncated)
         group_id = group_data['id']
-        group_title = group_data['title']
-        username = group_data.get('username')
+        full_title, full_username = await get_full_group_title_from_history(user_id, group_id, is_target=False)
+        group_title = full_title or group_data['title']
+        username = full_username if full_username is not None else group_data.get('username')
     else:
         normalized = normalize_group_input(text)
         
@@ -3591,9 +3604,11 @@ async def handle_invite_from_file_target_input(client: Client, message: Message,
     group_data = parse_group_button(text)
     
     if group_data:
+        # From button — restore full title from history (button text is truncated)
         group_id = group_data['id']
-        group_title = group_data['title']
-        username = group_data.get('username')
+        full_title, full_username = await get_full_group_title_from_history(user_id, group_id, is_target=True)
+        group_title = full_title or group_data['title']
+        username = full_username if full_username is not None else group_data.get('username')
     else:
         normalized = normalize_group_input(text)
         
@@ -4645,6 +4660,12 @@ async def handle_post_forward_callback(client: Client, callback_query):
         
         task_data = task_result.get('task', {})
         
+        # Stop task if running
+        if task_data.get('status') == 'running':
+            await safe_answer_callback(callback_query, "⏸️ Приостановка задачи...")
+            await api_client.stop_post_parse_task(task_id)
+            task_data['status'] = 'paused'
+            
         user_states[user_id]['editing_task_id'] = task_id
         user_states[user_id]['editing_task_type'] = 'post_parse'
         user_states[user_id]['post_forward_mode'] = 'parse'
@@ -4707,6 +4728,12 @@ async def handle_post_forward_callback(client: Client, callback_query):
         
         task_data = task_result.get('task', {})
         
+        # Stop task if running
+        if task_data.get('status') == 'running':
+            await safe_answer_callback(callback_query, "⏸️ Приостановка задачи...")
+            await api_client.stop_post_monitoring_task(task_id)
+            task_data['status'] = 'paused'
+            
         user_states[user_id]['editing_task_id'] = task_id
         user_states[user_id]['editing_task_type'] = 'post_monitor'
         user_states[user_id]['post_forward_mode'] = 'monitor'
@@ -5251,8 +5278,9 @@ async def handle_post_forward_text_input(client: Client, message: Message, text:
         group_data = parse_group_button(text)
         if group_data:
             group_id = group_data['id']
-            group_title = group_data['title']
-            username = group_data.get('username')
+            full_title, full_username = await get_full_group_title_from_history(user_id, group_id, is_target=False)
+            group_title = full_title or group_data['title']
+            username = full_username if full_username is not None else group_data.get('username')
             user_states[user_id]['pf_source'] = {
                 'id': int(group_id),
                 'title': group_title,
@@ -5368,8 +5396,9 @@ async def handle_post_forward_text_input(client: Client, message: Message, text:
         group_data = parse_group_button(text)
         if group_data:
             group_id = group_data['id']
-            group_title = group_data['title']
-            username = group_data.get('username')
+            full_title, full_username = await get_full_group_title_from_history(user_id, group_id, is_target=True)
+            group_title = full_title or group_data['title']
+            username = full_username if full_username is not None else group_data.get('username')
             user_states[user_id]['pf_target'] = {
                 'id': int(group_id),
                 'title': group_title,
@@ -5609,3 +5638,233 @@ async def show_post_forward_settings(client: Client, message: Message):
         msg_text,
         reply_markup=get_post_forward_settings_keyboard(settings, mode, edit_mode=bool(user_states[user_id].get('editing_task_id')), task_id=user_states[user_id].get('editing_task_id'))
     )
+
+
+async def handle_invite_settings_from_status(client: Client, callback_query):
+    """Handle opening settings for an invite task from status screen."""
+    user_id = int(callback_query.from_user.id)
+    task_id = int(callback_query.data.split(":")[1])
+    
+    # Get task details
+    result = await api_client.get_task(task_id)
+    if not result.get('success'):
+        await callback_query.answer("❌ Не удалось загрузить задачу", show_alert=True)
+        return
+
+    task = result.get('task', {})
+    
+    # Stop task if running
+    if task.get('status') == 'running':
+        await callback_query.answer("⏸️ Приостановка задачи...")
+        await api_client.stop_task(task_id)
+        task['status'] = 'paused'
+    
+    # Populate user state
+    user_states[user_id] = {} # Clear previous state
+    user_states[user_id]['editing_task_id'] = task_id
+    user_states[user_id]['editing_task_type'] = 'invite'
+    
+    # We need to map task fields to valid invite_settings keys
+    settings = {
+        'delay_seconds': task.get('delay_seconds', 30),
+        'delay_every': task.get('delay_every', 1),
+        'limit': task.get('limit'),
+        'rotate_sessions': task.get('rotate_sessions', False),
+        'rotate_every': task.get('rotate_every', 0),
+        'use_proxy': task.get('use_proxy', True),
+        'available_sessions': task.get('available_sessions', []),
+        'selected_sessions': task.get('available_sessions', []), # For consistency in UI
+        'filter_mode': task.get('filter_mode', 'all'),
+        'inactive_threshold_days': task.get('inactive_threshold_days'),
+        'invite_mode': task.get('invite_mode', 'member_list')
+    }
+    
+    user_states[user_id]['invite_settings'] = settings
+    
+    # Populate source/target for display context
+    user_states[user_id]['source_group'] = {
+        'title': task.get('source_group_title', 'N/A'),
+        'id': task.get('source_group_id')
+    }
+    user_states[user_id]['target_group'] = {
+        'title': task.get('target_group_title', 'N/A'),
+        'id': task.get('target_group_id')
+    }
+    if task.get('file_source'):
+        user_states[user_id]['source_file'] = task.get('file_source')
+        user_states[user_id]['invite_settings']['invite_mode'] = 'from_file'
+
+    # Show settings menu (in-place)
+    await callback_query.message.edit_text(
+        "⚙️ **Настройки инвайтинга**\n\n"
+        "Выберите параметр для изменения:",
+        reply_markup=get_settings_keyboard(settings, edit_mode=True)
+    )
+    await callback_query.answer()
+
+
+async def handle_parse_settings_from_status(client: Client, callback_query):
+    """Handle opening settings for a parse task from status screen."""
+    user_id = int(callback_query.from_user.id)
+    task_id = int(callback_query.data.split(":")[1])
+    
+    # Get task details
+    result = await api_client.get_parse_task(task_id)
+    if not result.get('success'):
+        await callback_query.answer("❌ Не удалось загрузить задачу", show_alert=True)
+        return
+
+    task = result.get('task', {})
+    
+    # Stop task if running
+    if task.get('status') == 'running':
+        await callback_query.answer("⏸️ Приостановка задачи...")
+        await api_client.stop_parse_task(task_id)
+        task['status'] = 'paused'
+    
+    # Populate user state
+    user_states[user_id] = {}
+    user_states[user_id]['editing_task_id'] = task_id
+    user_states[user_id]['editing_task_type'] = 'parse'
+    
+    settings = {
+        'delay_seconds': task.get('delay_seconds', 2),
+        'limit': task.get('limit'),
+        'save_every': task.get('save_every', 0),
+        'rotate_sessions': task.get('rotate_sessions', False),
+        'rotate_every': task.get('rotate_every', 0),
+        'use_proxy': task.get('use_proxy', True),
+        'available_sessions': task.get('available_sessions', []),
+        'selected_sessions': task.get('available_sessions', []),
+        'filter_admins': task.get('filter_admins', False),
+        'filter_inactive': task.get('filter_inactive', False),
+        'inactive_days': task.get('inactive_threshold_days', 30),
+        'keyword_filter': task.get('keyword_filter', []),
+        'exclude_keywords': task.get('exclude_keywords', []),
+        'parse_mode': task.get('parse_mode', 'member_list'),
+        # Message based settings
+        'messages_limit': task.get('messages_limit'),
+        'delay_every_requests': task.get('delay_every_requests', 1),
+        'rotate_every_requests': task.get('rotate_every_requests', 0),
+        'save_every_users': task.get('save_every_users', 0)
+    }
+    
+    user_states[user_id]['parse_settings'] = settings
+    
+    # Populate context
+    user_states[user_id]['parse_file_name'] = task.get('file_name', 'N/A')
+    user_states[user_id]['parse_source_group'] = {
+        'title': task.get('source_group_title', 'N/A'),
+        'id': task.get('source_group_id'),
+        'username': task.get('source_username')
+    }
+    user_states[user_id]['parse_source_type'] = task.get('source_type', 'group')
+
+    # Show settings menu (in-place)
+    await callback_query.message.edit_text(
+        "⚙️ **Настройки парсинга**\n\n"
+        "Выберите параметр для изменения:",
+        reply_markup=get_parse_settings_keyboard(settings, edit_mode=True)
+    )
+    await callback_query.answer()
+
+
+async def handle_invite_settings_save(client: Client, callback_query):
+    """Save invite settings and return to status."""
+    user_id = int(callback_query.from_user.id)
+    task_id = user_states.get(user_id, {}).get('editing_task_id')
+    
+    if not task_id:
+        await callback_query.answer("❌ Ошибка: ID задачи не найден", show_alert=True)
+        return
+
+    settings = user_states.get(user_id, {}).get('invite_settings', {})
+    
+    # Save settings via API
+    result = await api_client.update_task(
+        task_id=task_id,
+        delay_seconds=settings.get('delay_seconds'),
+        delay_every=settings.get('delay_every'),
+        limit=settings.get('limit'),
+        rotate_sessions=settings.get('rotate_sessions'),
+        rotate_every=settings.get('rotate_every'),
+        use_proxy=settings.get('use_proxy'),
+        available_sessions=settings.get('selected_sessions'),
+        filter_mode=settings.get('filter_mode'),
+        inactive_threshold_days=settings.get('inactive_threshold_days')
+    )
+    
+    if result.get('success'):
+        await callback_query.answer("✅ Настройки сохранены")
+        # Return to task details (it will show Resume/Start buttons)
+        await handle_invite_status(client, callback_query, task_id)
+    else:
+        await callback_query.answer(f"❌ Ошибка сохранения: {result.get('error')}", show_alert=True)
+
+
+async def handle_invite_settings_cancel(client: Client, callback_query):
+    """Cancel invite settings editing and return to status."""
+    user_id = int(callback_query.from_user.id)
+    task_id = user_states.get(user_id, {}).get('editing_task_id')
+    
+    if not task_id:
+        await callback_query.answer("❌ Ошибка: ID задачи не найден", show_alert=True)
+        return
+
+    await callback_query.answer("❌ Редактирование отменено")
+    await handle_invite_status(client, callback_query, task_id)
+
+
+async def handle_parse_settings_save(client: Client, callback_query):
+    """Save parse settings and return to status."""
+    user_id = int(callback_query.from_user.id)
+    task_id = user_states.get(user_id, {}).get('editing_task_id')
+    
+    if not task_id:
+        await callback_query.answer("❌ Ошибка: ID задачи не найден", show_alert=True)
+        return
+
+    settings = user_states.get(user_id, {}).get('parse_settings', {})
+    
+    # Save settings via API
+    # Prepare kwargs from settings
+    update_data = {
+        'delay_seconds': settings.get('delay_seconds'),
+        'limit': settings.get('limit'),
+        'save_every': settings.get('save_every'),
+        'rotate_sessions': settings.get('rotate_sessions'),
+        'rotate_every': settings.get('rotate_every'),
+        'use_proxy': settings.get('use_proxy'),
+        'available_sessions': settings.get('selected_sessions'),
+        'filter_admins': settings.get('filter_admins'),
+        'filter_inactive': settings.get('filter_inactive'),
+        'inactive_threshold_days': settings.get('inactive_threshold_days'),
+        'keyword_filter': settings.get('keyword_filter'),
+        'exclude_keywords': settings.get('exclude_keywords'),
+        # Message based settings
+        'messages_limit': settings.get('messages_limit'),
+        'delay_every_requests': settings.get('delay_every_requests'),
+        'rotate_every_requests': settings.get('rotate_every_requests'),
+        'save_every_users': settings.get('save_every_users')
+    }
+    
+    result = await api_client.update_parse_task(task_id, **update_data)
+    
+    if result.get('success'):
+        await callback_query.answer("✅ Настройки сохранены")
+        await handle_parse_status(client, callback_query, task_id)
+    else:
+        await callback_query.answer(f"❌ Ошибка сохранения: {result.get('error')}", show_alert=True)
+
+
+async def handle_parse_settings_cancel(client: Client, callback_query):
+    """Cancel parse settings editing and return to status."""
+    user_id = int(callback_query.from_user.id)
+    task_id = user_states.get(user_id, {}).get('editing_task_id')
+    
+    if not task_id:
+        await callback_query.answer("❌ Ошибка: ID задачи не найден", show_alert=True)
+        return
+
+    await callback_query.answer("❌ Редактирование отменено")
+    await handle_parse_status(client, callback_query, task_id)

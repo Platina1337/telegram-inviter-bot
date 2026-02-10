@@ -930,7 +930,11 @@ async def get_parse_task(task_id: int):
             "error_message": task.error_message,
             "delay_every": task.delay_every,
             "last_action_time": task.last_action_time,
-            "current_session": task.current_session
+            "current_session": task.current_session,
+            "last_heartbeat": task.last_heartbeat,
+            "worker_phase": task.worker_phase,
+            "validated_sessions": task.validated_sessions,
+            "validation_errors": task.validation_errors
         }
     }
 
@@ -1123,7 +1127,11 @@ async def get_post_parse_task(task_id: int):
             "signature_options": getattr(task, 'signature_options', None),
             "last_message_id": task.last_message_id,
             "created_at": task.created_at,
-            "error_message": task.error_message
+            "error_message": task.error_message,
+            "last_heartbeat": task.last_heartbeat,
+            "worker_phase": task.worker_phase,
+            "validated_sessions": task.validated_sessions,
+            "validation_errors": task.validation_errors
         }
     }
 
@@ -1351,7 +1359,11 @@ async def get_post_monitoring_task(task_id: int):
             "add_signature": getattr(task, 'add_signature', False),
             "signature_options": getattr(task, 'signature_options', None),
             "created_at": task.created_at,
-            "error_message": task.error_message
+            "error_message": task.error_message,
+            "last_heartbeat": task.last_heartbeat,
+            "worker_phase": task.worker_phase,
+            "validated_sessions": task.validated_sessions,
+            "validation_errors": task.validation_errors
         }
     }
 

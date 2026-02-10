@@ -131,14 +131,36 @@ def parse_group_button(text: str) -> Optional[Dict]:
     }
 
 
+# Telegram limit for ReplyKeyboard button label (1-64 chars)
+GROUP_BUTTON_MAX_LEN = 64
+
+
+async def get_full_group_title_from_history(user_id: int, group_id: str, is_target: bool = False) -> tuple:
+    """Get full title and username from history by group_id (for when user taps truncated button)."""
+    groups = await api_client.get_user_target_groups(user_id) if is_target else await api_client.get_user_groups(user_id)
+    gid = str(group_id)
+    for g in groups or []:
+        if str(g.get("id") or "") == gid:
+            return (g.get("title") or "", g.get("username"))
+    return ("", None)
+
+
 def format_group_button(title: str, group_id, username: str = None) -> str:
-    """Format group button text."""
+    """Format group button text. Truncates long titles so full ID (and @username if present) fits (64 char limit)."""
     clean_title = (title or "").strip()
     clean_id = str(group_id) if group_id else "?"
-    
+    # Суффикс: всегда ID; тег @username добавляем, если есть и помещается
+    suffix = f" (ID: {clean_id})"
     if username:
-        return f"{clean_title} (ID: {clean_id}, @{username})"
-    return f"{clean_title} (ID: {clean_id})"
+        u = (username.strip() if isinstance(username, str) else "").lstrip("@")[:20]  # макс. 20 символов
+        if u:
+            suffix = f" (ID: {clean_id}, @{u})"
+    max_title_len = GROUP_BUTTON_MAX_LEN - len(suffix) - 3  # запас на "…"
+    if max_title_len < 1:
+        max_title_len = 1
+    if len(clean_title) > max_title_len:
+        clean_title = clean_title[:max_title_len].rstrip() + "…"
+    return clean_title + suffix
 
 
 def normalize_group_input(text: str) -> str:
@@ -437,6 +459,57 @@ def get_task_assignment_keyboard(session_alias: str) -> InlineKeyboardMarkup:
 
 # ============== Formatting Functions ==============
 
+
+def _format_validation_info(task_data: Dict) -> str:
+    """Format session validation information."""
+    validated_sessions = task_data.get('validated_sessions', [])
+    validation_errors = task_data.get('validation_errors')
+    text = ""
+    
+    # Error mapping
+    error_map = {
+        "No access": "Нет доступа",
+        "Connection failed": "Ошибка подключения",
+        "Session failed": "Сбой сессии",
+        "PeerIdInvalid": "Нет прав/ID",
+        "Auth key invalid": "Сессия сброшена",
+        "User deactivated": "Аккаунт удален",
+        "FloodWait": "Флуд-лимит",
+        "ChatWriteForbidden": "Запрет писать",
+        "ChatAdminRequired": "Нужны права админа"
+    }
+
+    if validation_errors:
+        import json
+        if isinstance(validation_errors, str):
+            try:
+                validation_errors = json.loads(validation_errors)
+            except:
+                pass
+        
+        if isinstance(validation_errors, dict) and validation_errors:
+            text += "\n❌ **Не прошли проверку:**\n"
+            limit = 5
+            count = 0
+            for session, error in validation_errors.items():
+                err_msg = str(error)
+                # Apply mapping
+                for key, value in error_map.items():
+                    if key in err_msg:
+                        err_msg = value
+                        break
+                
+                text += f"- {session}: {err_msg}\n"
+                count += 1
+                if count >= limit:
+                    remaining = len(validation_errors) - limit
+                    if remaining > 0:
+                        text += f" и еще {remaining}...\n"
+                    break
+    
+    return text
+
+
 def format_invite_status(task_data: Dict) -> str:
     """Format invite task status message."""
     from datetime import datetime, timedelta
@@ -484,11 +557,24 @@ def format_invite_status(task_data: Dict) -> str:
     inactive_threshold_text = f"{inactive_threshold_days} дн." if inactive_threshold_days is not None else "Выкл."
     
     # Format available sessions list
+    # Use validated_sessions if available (preferred), otherwise fall back to available_sessions
+    validated_sessions = task_data.get('validated_sessions')
     available_sessions = task_data.get('available_sessions', [])
-    if available_sessions:
-        sessions_text = ', '.join(available_sessions)
+    
+    if validated_sessions:
+        sessions_to_show = validated_sessions
+        sessions_label = "📋 Сессии"
+    elif available_sessions:
+        sessions_to_show = available_sessions
+        sessions_label = "📋 Сессии (все)"
     else:
-        # Fallback to current session if available_sessions is empty
+        sessions_to_show = []
+        sessions_label = "📋 Сессии"
+
+    if sessions_to_show:
+        sessions_text = ', '.join(sessions_to_show)
+    else:
+        # Fallback to current session
         current_session = task_data.get('session', 'N/A')
         sessions_text = current_session
     
@@ -496,40 +582,74 @@ def format_invite_status(task_data: Dict) -> str:
     if (not source_display or source_display == 'N/A') and task_data.get('file_source'):
         source_display = f"📄 {task_data['file_source']}"
 
-    # Calculate time until next action
+    # Calculate time until next action / Heartbeat check
     time_until_next = ""
     last_action_time = task_data.get('last_action_time')
+    last_heartbeat = task_data.get('last_heartbeat')
+    worker_phase = task_data.get('worker_phase', 'unknown')
     delay_seconds = task_data.get('delay_seconds', 30)
     delay_every = task_data.get('delay_every', 1)
     
-    if status == 'running' and last_action_time and invited > 0:
+    # Check if worker is alive
+    is_alive = True
+    if status == 'running' and last_heartbeat:
         try:
-            last_action = datetime.fromisoformat(last_action_time)
+            last_hb = datetime.fromisoformat(last_heartbeat)
             now = datetime.now()
-            elapsed = (now - last_action).total_seconds()
-            
-            # Calculate when next delay will be applied
-            # Delay is applied every delay_every invites
-            invites_since_last_delay = invited % delay_every
-            
-            if invites_since_last_delay == 0:
-                # Just had a delay, show remaining time
-                remaining = max(0, delay_seconds - elapsed)
-                if remaining > 0:
-                    time_until_next = f"\n⏱️ След. действие через: {int(remaining)} сек"
-                else:
-                    time_until_next = f"\n⏱️ Готов к действию"
-            else:
-                # No delay applied yet, show small delay or ready
-                # Small delay is 2-5 seconds between invites
-                small_delay = 5  # max small delay
-                remaining = max(0, small_delay - elapsed)
-                if remaining > 0:
-                    time_until_next = f"\n⏱️ След. действие через: {int(remaining)} сек"
-                else:
-                    time_until_next = f"\n⏱️ Готов к действию"
+            # If heartbeat is older than 60s, consider it stuck
+            if (now - last_hb).total_seconds() > 60:
+                is_alive = False
         except:
             pass
+            
+    if status == 'running':
+        if not is_alive:
+            time_until_next = "\n⚠️ Воркер не отвечает > 1 мин. Пауза/Продолжить?"
+        elif worker_phase == 'sleeping':
+             # It's sleeping, so it waits for delay
+             if last_action_time:
+                 try:
+                     last_action = datetime.fromisoformat(last_action_time)
+                     now = datetime.now()
+                     elapsed = (now - last_action).total_seconds()
+                     
+                     # Calculate when next delay will be applied logic is tricky because 
+                     # we don't know exactly if we are in the 'long' delay or short delay 
+                     # just by looking at times, but if phase is 'sleeping' we are likely in a delay.
+                     # Let's assume we are in the delay_seconds delay.
+                     remaining = max(0, delay_seconds - elapsed)
+                     if remaining > 0:
+                         time_until_next = f"\n⏱️ След. действие через: {int(remaining)} сек"
+                     else:
+                         time_until_next = f"\n⏱️ Готов к действию"
+                 except:
+                     pass
+        elif worker_phase == 'inviting':
+             time_until_next = "\n⚡ Активно приглашает..."
+        elif last_action_time and invited > 0:
+            # Fallback logic if phase not set or confusing
+            try:
+                last_action = datetime.fromisoformat(last_action_time)
+                now = datetime.now()
+                elapsed = (now - last_action).total_seconds()
+                
+                invites_since_last_delay = invited % delay_every
+                
+                if invites_since_last_delay == 0:
+                    remaining = max(0, delay_seconds - elapsed)
+                    if remaining > 0:
+                        time_until_next = f"\n⏱️ След. действие через: {int(remaining)} сек"
+                    else:
+                        time_until_next = f"\n⏱️ Готов к действию"
+                else:
+                    small_delay = 5
+                    remaining = max(0, small_delay - elapsed)
+                    if remaining > 0:
+                        time_until_next = f"\n⏱️ След. действие через: {int(remaining)} сек"
+                    else:
+                        time_until_next = f"\n⏱️ Готов к действию"
+            except:
+                pass
     
     # Эффективная активная сессия: если текущая не в списке выбранных (настройки сменили) — показываем первую из списка
     effective_session = task_data.get('session') or task_data.get('current_session') or 'N/A'
@@ -549,7 +669,7 @@ def format_invite_status(task_data: Dict) -> str:
 👥 Приглашено: {invited}{limit_text}
 ⏱️ Задержка: ~{task_data.get('delay_seconds', 30)} сек (каждые {task_data.get('delay_every', 1)} инв.){time_until_next}
 🔐 Сессия: {effective_session}
-📋 Сессии: {sessions_text}{current_session_info}
+{sessions_label}: {sessions_text}{current_session_info}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 👥 Фильтр: {filter_mode_text}
@@ -557,6 +677,8 @@ def format_invite_status(task_data: Dict) -> str:
 
 📋 Статус: {status_text}
 """
+    
+    text += _format_validation_info(task_data)
     
     if task_data.get('error_message'):
         text += f"\n⚠️ Ошибка: {task_data['error_message']}"
@@ -601,44 +723,81 @@ def format_parse_status(task_data: Dict) -> str:
     proxy_info = "Используется" if task_data.get('use_proxy') else "Выкл"
     
     # Session info
+    validated_sessions = task_data.get('validated_sessions')
     available_sessions = task_data.get('available_sessions', [])
-    if available_sessions:
-        sessions_text = ', '.join(available_sessions)
+    
+    if validated_sessions:
+        sessions_to_show = validated_sessions
+        sessions_label = "📋 Сессии"
+    elif available_sessions:
+        sessions_to_show = available_sessions
+        sessions_label = "📋 Сессии (все)"
+    else:
+        sessions_to_show = []
+        sessions_label = "📋 Сессии"
+        
+    if sessions_to_show:
+        sessions_text = ', '.join(sessions_to_show)
     else:
         sessions_text = task_data.get('session', 'N/A')
     
-    # Calculate time until next action
+    # Calculate time until next action / Heartbeat
     time_until_next = ""
     last_action_time = task_data.get('last_action_time')
+    last_heartbeat = task_data.get('last_heartbeat')
+    worker_phase = task_data.get('worker_phase', 'unknown')
     delay_seconds = task_data.get('delay_seconds', 2)
     delay_every = task_data.get('delay_every', 1)
     
-    if status == 'running' and last_action_time and parsed > 0:
+    # Heartbeat check
+    is_alive = True
+    if status == 'running' and last_heartbeat:
         try:
-            last_action = datetime.fromisoformat(last_action_time)
+            last_hb = datetime.fromisoformat(last_heartbeat)
             now = datetime.now()
-            elapsed = (now - last_action).total_seconds()
-            
-            # Calculate when next delay will be applied
-            parses_since_last_delay = parsed % delay_every
-            
-            if parses_since_last_delay == 0:
-                # Just had a delay, show remaining time
-                remaining = max(0, delay_seconds - elapsed)
-                if remaining > 0:
-                    time_until_next = f" (через {int(remaining)} сек)"
-                else:
-                    time_until_next = " (готов)"
-            else:
-                # No delay applied yet, small delay between requests
-                small_delay = 2  # typical small delay
-                remaining = max(0, small_delay - elapsed)
-                if remaining > 0:
-                    time_until_next = f" (через {int(remaining)} сек)"
-                else:
-                    time_until_next = " (готов)"
+            if (now - last_hb).total_seconds() > 60:
+                is_alive = False
         except:
             pass
+
+    if status == 'running':
+        if not is_alive:
+            time_until_next = " (Воркер не отвечает > 1 мин. Пауза/Продолжить?)"
+        elif worker_phase == 'sleeping':
+            # It's sleeping, waiting for delay to finish
+            if last_action_time:
+                try:
+                    last_action = datetime.fromisoformat(last_action_time)
+                    now = datetime.now()
+                    elapsed = (now - last_action).total_seconds()
+                    remaining = max(0, delay_seconds - elapsed)
+                    if remaining > 0:
+                        time_until_next = f" (через {int(remaining)} сек)"
+                    else:
+                        time_until_next = " (готов)"
+                except:
+                    pass
+        elif worker_phase == 'parsing':
+             time_until_next = " (в процессе...)"
+        elif last_action_time and parsed > 0:
+             # Fallback
+             try:
+                 last_action = datetime.fromisoformat(last_action_time)
+                 now = datetime.now()
+                 elapsed = (now - last_action).total_seconds()
+                 
+                 parses_since_last_delay = parsed % delay_every
+                 if parses_since_last_delay == 0:
+                     remaining = max(0, delay_seconds - elapsed)
+                 else:
+                     remaining = max(0, 2 - elapsed)
+                     
+                 if remaining > 0:
+                     time_until_next = f" (через {int(remaining)} сек)"
+                 else:
+                     time_until_next = " (готов)"
+             except:
+                 pass
     
     # Эффективная сессия: если текущая не в списке выбранных — показываем первую из списка
     current_session_display = task_data.get('session') or task_data.get('current_session') or 'N/A'
@@ -689,7 +848,7 @@ def format_parse_status(task_data: Dict) -> str:
 📥 Сохранение: {save_every_text}
 ⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек каждые {delay_every_requests} запр.{time_until_next}
 🔐 Текущая сессия: {current_session_display}
-📋 Все сессии: {sessions_text}
+{sessions_label}: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 """
@@ -715,13 +874,15 @@ def format_parse_status(task_data: Dict) -> str:
 📥 Сохранение: {save_every_text}
 ⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек{time_until_next}
 🔐 Текущая сессия: {current_session_display}
-📋 Все сессии: {sessions_text}
+{sessions_label}: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 🚫 Исключать: {filter_text}
 """
     
     text += f"\n📋 Статус: {status_text}"
+    
+    text += _format_validation_info(task_data)
     
     if task_data.get('error_message'):
         text += f"\n⚠️ Ошибка: {task_data['error_message']}"
@@ -1477,10 +1638,61 @@ def format_post_parse_status(task_data: Dict) -> str:
     media_text = {"all": "Все", "media_only": "Только медиа", "text_only": "Только текст"}.get(media_filter, "Все")
     
     available_sessions = task_data.get('available_sessions', [])
-    sessions_text = ', '.join(available_sessions) if available_sessions else task_data.get('session', 'N/A')
+    validated_sessions = task_data.get('validated_sessions')
+    
+    if validated_sessions:
+        sessions_to_show = validated_sessions
+        sessions_label = "📋 Сессии"
+    elif available_sessions:
+        sessions_to_show = available_sessions
+        sessions_label = "📋 Сессии (все)"
+    else:
+        sessions_to_show = []
+        sessions_label = "📋 Сессии"
+        
+    sessions_text = ', '.join(sessions_to_show) if sessions_to_show else task_data.get('session', 'N/A')
+    
     effective_session = task_data.get('session') or task_data.get('current_session') or 'N/A'
     if available_sessions and effective_session not in available_sessions:
         effective_session = available_sessions[0]
+        
+    # Heartbeat / Phase check
+    from datetime import datetime
+    last_heartbeat = task_data.get('last_heartbeat')
+    worker_phase = task_data.get('worker_phase', 'unknown')
+    last_action_time = task_data.get('last_action_time')
+    delay_seconds = task_data.get('delay_seconds', 2)
+    
+    status_msg = ""
+    is_alive = True
+    if status == 'running' and last_heartbeat:
+        try:
+            last_hb = datetime.fromisoformat(last_heartbeat)
+            now = datetime.now()
+            if (now - last_hb).total_seconds() > 60:
+                is_alive = False
+        except:
+            pass
+
+    if status == 'running':
+        if not is_alive:
+            status_msg = "\n⚠️ Воркер не отвечает > 1 мин. Пауза/Продолжить?"
+        elif worker_phase == 'sleeping':
+            # It's sleeping
+            remaining = ""
+            if last_action_time:
+                try:
+                    last_action = datetime.fromisoformat(last_action_time)
+                    now = datetime.now()
+                    elapsed = (now - last_action).total_seconds()
+                    rem = max(0, delay_seconds - elapsed)
+                    if rem > 0:
+                        remaining = f" (через {int(rem)} сек)"
+                except:
+                    pass
+            status_msg = f"\n⏱️ Ожидание{remaining}"
+        elif worker_phase == 'forwarding':
+             status_msg = "\n⚡ Активно пересылает..."
     
     text = f"""
 {icon} **Статус парсинга постов**
@@ -1491,9 +1703,9 @@ def format_post_parse_status(task_data: Dict) -> str:
 📨 Переслано: {forwarded}{limit_text}
 📋 Направление: {direction_text}
 🎬 Фильтр медиа: {media_text}
-⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек (каждые {task_data.get('delay_every', 1)} пост.)
+⏱️ Задержка: {task_data.get('delay_seconds', 2)} сек (каждые {task_data.get('delay_every', 1)} пост.){status_msg}
 🔐 Сессия: {effective_session}
-📋 Сессии: {sessions_text}
+{sessions_label}: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 📞 Фильтр контактов: {filter_contacts_info}
@@ -1502,6 +1714,8 @@ def format_post_parse_status(task_data: Dict) -> str:
 
 📋 Статус: {status_text}
 """
+    
+    text += _format_validation_info(task_data)
     
     if task_data.get('error_message'):
         text += f"\n⚠️ Ошибка: {task_data['error_message']}"
@@ -1546,10 +1760,61 @@ def format_post_monitor_status(task_data: Dict) -> str:
     add_signature_info = 'Да' if task_data.get('add_signature') else 'Нет'
     
     available_sessions = task_data.get('available_sessions', [])
-    sessions_text = ', '.join(available_sessions) if available_sessions else task_data.get('session', 'N/A')
+    validated_sessions = task_data.get('validated_sessions')
+    
+    if validated_sessions:
+        sessions_to_show = validated_sessions
+        sessions_label = "📋 Сессии"
+    elif available_sessions:
+        sessions_to_show = available_sessions
+        sessions_label = "📋 Сессии (все)"
+    else:
+        sessions_to_show = []
+        sessions_label = "📋 Сессии"
+        
+    sessions_text = ', '.join(sessions_to_show) if sessions_to_show else task_data.get('session', 'N/A')
+    
     effective_session = task_data.get('session') or task_data.get('current_session') or 'N/A'
     if available_sessions and effective_session not in available_sessions:
         effective_session = available_sessions[0]
+
+    # Heartbeat / Phase check
+    from datetime import datetime
+    last_heartbeat = task_data.get('last_heartbeat')
+    worker_phase = task_data.get('worker_phase', 'unknown')
+    last_action_time = task_data.get('last_action_time')
+    delay_seconds = task_data.get('delay_seconds', 0)
+    
+    status_msg = ""
+    is_alive = True
+    if status == 'running' and last_heartbeat:
+        try:
+            last_hb = datetime.fromisoformat(last_heartbeat)
+            now = datetime.now()
+            if (now - last_hb).total_seconds() > 60:
+                is_alive = False
+        except:
+            pass
+
+    if status == 'running':
+        if not is_alive:
+            status_msg = "\n⚠️ Воркер не отвечает > 1 мин. Пауза/Продолжить?"
+        elif worker_phase == 'sleeping':
+            # It's sleeping
+            remaining = ""
+            if last_action_time:
+                try:
+                    last_action = datetime.fromisoformat(last_action_time)
+                    now = datetime.now()
+                    elapsed = (now - last_action).total_seconds()
+                    rem = max(0, delay_seconds - elapsed)
+                    if rem > 0:
+                        remaining = f" (через {int(rem)} сек)"
+                except:
+                    pass
+            status_msg = f"\n⏱️ Ожидание{remaining}"
+        elif worker_phase == 'monitoring':
+             status_msg = "\n👀 Мониторинг..."
     
     text = f"""
 {icon} **Статус мониторинга постов**
@@ -1558,9 +1823,9 @@ def format_post_monitor_status(task_data: Dict) -> str:
 📥 Цель: {task_data.get('target_title', 'N/A')} ({task_data.get('target_type', 'channel')})
 
 📨 Переслано: {forwarded}{limit_text}
-⏱️ Задержка: {task_data.get('delay_seconds', 0)} сек
+⏱️ Задержка: {task_data.get('delay_seconds', 0)} сек{status_msg}
 🔐 Сессия: {effective_session}
-📋 Сессии: {sessions_text}
+{sessions_label}: {sessions_text}
 🔄 Ротация: {rotate_info}
 🌐 Прокси: {proxy_info}
 📞 Фильтр контактов: {filter_contacts_info}
@@ -1569,6 +1834,8 @@ def format_post_monitor_status(task_data: Dict) -> str:
 
 📋 Статус: {status_text}
 """
+    
+    text += _format_validation_info(task_data)
     
     if task_data.get('error_message'):
         text += f"\n⚠️ Ошибка: {task_data['error_message']}"

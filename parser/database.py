@@ -495,6 +495,102 @@ class Database:
         except:
             pass
 
+        # Migration: add last_heartbeat to invite_tasks for tracking task health
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN last_heartbeat TEXT")
+        except:
+            pass
+
+        # Migration: add worker_phase to invite_tasks
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN worker_phase TEXT")
+        except:
+            pass
+            
+        # Migration: add last_heartbeat to parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN last_heartbeat TEXT")
+        except:
+            pass
+
+        # Migration: add worker_phase to parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN worker_phase TEXT")
+        except:
+            pass
+            
+        # Migration: add last_heartbeat to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN last_heartbeat TEXT")
+        except:
+            pass
+
+        # Migration: add worker_phase to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN worker_phase TEXT")
+        except:
+            pass
+            
+        # Migration: add last_heartbeat to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN last_heartbeat TEXT")
+        except:
+            pass
+
+        # Migration: add worker_phase to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN worker_phase TEXT")
+        except:
+            pass
+
+        # Migration: add validated_sessions to invite_tasks
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN validated_sessions TEXT")
+        except:
+            pass
+
+        # Migration: add validation_errors to invite_tasks
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN validation_errors TEXT")
+        except:
+            pass
+            
+        # Migration: add validated_sessions to parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN validated_sessions TEXT")
+        except:
+            pass
+
+        # Migration: add validation_errors to parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE parse_tasks ADD COLUMN validation_errors TEXT")
+        except:
+            pass
+            
+        # Migration: add validated_sessions to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN validated_sessions TEXT")
+        except:
+            pass
+
+        # Migration: add validation_errors to post_parse_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_parse_tasks ADD COLUMN validation_errors TEXT")
+        except:
+            pass
+            
+        # Migration: add validated_sessions to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN validated_sessions TEXT")
+        except:
+            pass
+
+        # Migration: add validation_errors to post_monitoring_tasks
+        try:
+            await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN validation_errors TEXT")
+        except:
+            pass
+
         await self.conn.commit()
 
     
@@ -734,6 +830,8 @@ class Database:
                 value = ','.join(value)
             elif key == 'failed_sessions' and isinstance(value, list):
                 value = ','.join(value)
+            elif key == 'validated_sessions' and isinstance(value, list):
+                value = ','.join(value)
             elif key == 'filter_mode':
                 value = str(value)
             elif key == 'inactive_threshold_days':
@@ -748,7 +846,8 @@ class Database:
         )
         await self.conn.commit()
     
-    async def delete_invite_task(self, task_id: int):
+    async def delete_invite_task(self, task_id: int):   
+
         """Delete invite task."""
         await self.conn.execute("DELETE FROM invite_tasks WHERE id = ?", (task_id,))
         await self.conn.commit()
@@ -789,7 +888,11 @@ class Database:
             filter_mode=row['filter_mode'] if 'filter_mode' in row.keys() else 'all',
             inactive_threshold_days=row['inactive_threshold_days'] if 'inactive_threshold_days' in row.keys() else None,
             last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
-            current_session=row['current_session'] if 'current_session' in row.keys() else None
+            current_session=row['current_session'] if 'current_session' in row.keys() else None,
+            last_heartbeat=row['last_heartbeat'] if 'last_heartbeat' in row.keys() else None,
+            worker_phase=row['worker_phase'] if 'worker_phase' in row.keys() else None,
+            validated_sessions=row['validated_sessions'].split(',') if 'validated_sessions' in row.keys() and row['validated_sessions'] else [],
+            validation_errors=json.loads(row['validation_errors']) if 'validation_errors' in row.keys() and row['validation_errors'] else None
         )
 
     
@@ -953,7 +1056,8 @@ class Database:
             'session_alias', 'current_session', 'error_message', 'messages_limit', 'delay_every_requests',
             'rotate_every_requests', 'save_every_users', 'messages_offset',
             'filter_admins', 'filter_inactive', 'inactive_threshold_days',
-            'parse_mode', 'keyword_filter', 'exclude_keywords'
+            'parse_mode', 'keyword_filter', 'exclude_keywords',
+            'validated_sessions', 'validation_errors'
         }
         
         updates = []
@@ -963,7 +1067,7 @@ class Database:
             if key in allowed_fields:
                 if key in ['rotate_sessions', 'use_proxy', 'filter_admins', 'filter_inactive']:
                     value = 1 if value else 0
-                elif key in ['available_sessions', 'failed_sessions', 'keyword_filter', 'exclude_keywords']:
+                elif key in ['available_sessions', 'failed_sessions', 'keyword_filter', 'exclude_keywords', 'validated_sessions']:
                     value = ','.join(value) if isinstance(value, list) else value
                 
                 updates.append(f"{key} = ?")
@@ -1061,7 +1165,11 @@ class Database:
             save_every_users=row['save_every_users'] if 'save_every_users' in row.keys() else 0,
             messages_offset=row['messages_offset'] if 'messages_offset' in row.keys() else 0,
             last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
-            current_session=row['current_session'] if 'current_session' in row.keys() else None
+            current_session=row['current_session'] if 'current_session' in row.keys() else None,
+            last_heartbeat=row['last_heartbeat'] if 'last_heartbeat' in row.keys() else None,
+            worker_phase=row['worker_phase'] if 'worker_phase' in row.keys() else None,
+            validated_sessions=row['validated_sessions'].split(',') if 'validated_sessions' in row.keys() and row['validated_sessions'] else [],
+            validation_errors=json.loads(row['validation_errors']) if 'validation_errors' in row.keys() and row['validation_errors'] else None
         )
 
     # ============== Post Parse Tasks ==============
@@ -1120,7 +1228,8 @@ class Database:
             'parse_direction', 'media_filter', 'last_message_id', 'session_alias',
             'error_message', 'last_action_time', 'current_session',
             'use_native_forward', 'check_content_if_native', 'forward_show_source',
-            'keywords_whitelist', 'keywords_blacklist', 'add_signature', 'signature_options'
+            'keywords_whitelist', 'keywords_blacklist', 'add_signature', 'signature_options',
+            'validated_sessions', 'validation_errors'
         }
         updates = []
         values = []
@@ -1129,7 +1238,7 @@ class Database:
                 if key in ['rotate_sessions', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts',
                            'use_native_forward', 'check_content_if_native', 'forward_show_source', 'add_signature']:
                     value = 1 if value else 0
-                elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist']:
+                elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist', 'validated_sessions']:
                     value = ','.join(value) if isinstance(value, list) else value
                 elif key == 'signature_options':
                     value = json.dumps(value) if value is not None else None
@@ -1211,7 +1320,11 @@ class Database:
             keywords_whitelist=row['keywords_whitelist'].split(',') if 'keywords_whitelist' in row.keys() and row['keywords_whitelist'] else [],
             keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else [],
             add_signature=bool(row['add_signature']) if 'add_signature' in row.keys() else False,
-            signature_options=sig_opts
+            signature_options=sig_opts,
+            last_heartbeat=row['last_heartbeat'] if 'last_heartbeat' in row.keys() else None,
+            worker_phase=row['worker_phase'] if 'worker_phase' in row.keys() else None,
+            validated_sessions=row['validated_sessions'].split(',') if 'validated_sessions' in row.keys() and row['validated_sessions'] else [],
+            validation_errors=json.loads(row['validation_errors']) if 'validation_errors' in row.keys() and row['validation_errors'] else None
         )
 
     # ============== Post Monitoring Tasks ==============
@@ -1266,7 +1379,8 @@ class Database:
             'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts', 'session_alias',
             'error_message', 'last_action_time', 'current_session',
             'use_native_forward', 'check_content_if_native', 'forward_show_source',
-            'media_filter', 'keywords_whitelist', 'keywords_blacklist', 'add_signature', 'signature_options'
+            'media_filter', 'keywords_whitelist', 'keywords_blacklist', 'add_signature', 'signature_options',
+            'last_heartbeat', 'worker_phase', 'validated_sessions', 'validation_errors'
         }
         updates = []
         values = []
@@ -1274,9 +1388,9 @@ class Database:
             if key in allowed_fields:
                 if key in ['rotate_sessions', 'use_proxy', 'filter_contacts', 'remove_contacts', 'skip_on_contacts', 'use_native_forward', 'check_content_if_native', 'forward_show_source', 'add_signature']:
                     value = 1 if value else 0
-                elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist']:
+                elif key in ['available_sessions', 'failed_sessions', 'keywords_whitelist', 'keywords_blacklist', 'validated_sessions']:
                     value = ','.join(value) if isinstance(value, list) else value
-                elif key == 'signature_options':
+                elif key in ['signature_options', 'validation_errors']:
                     value = json.dumps(value) if value is not None else None
                 updates.append(f"{key} = ?")
                 values.append(value)
@@ -1315,16 +1429,29 @@ class Database:
     def _row_to_post_monitoring_task(self, row) -> 'PostMonitoringTask':
         """Convert database row to PostMonitoringTask object."""
         from shared.models import PostMonitoringTask
+        
         available_sessions = row['available_sessions'].split(',') if row['available_sessions'] else []
         failed_sessions = row['failed_sessions'].split(',') if row['failed_sessions'] else []
         available_sessions = [s for s in available_sessions if s]
         failed_sessions = [s for s in failed_sessions if s]
+        
         sig_opts = None
         if 'signature_options' in row.keys() and row['signature_options']:
             try:
                 sig_opts = json.loads(row['signature_options'])
             except (TypeError, ValueError):
                 pass
+                
+        keyword_filters = {}
+        # Simple extraction if fields exist (assuming migration applied)
+        keywords_whitelist = []
+        if 'keywords_whitelist' in row.keys() and row['keywords_whitelist']:
+             keywords_whitelist = row['keywords_whitelist'].split(',')
+        
+        keywords_blacklist = []
+        if 'keywords_blacklist' in row.keys() and row['keywords_blacklist']:
+             keywords_blacklist = row['keywords_blacklist'].split(',')
+
         return PostMonitoringTask(
             id=row['id'], user_id=row['user_id'], source_id=row['source_id'],
             source_title=row['source_title'] or '',
@@ -1338,20 +1465,24 @@ class Database:
             delay_seconds=row['delay_seconds'],
             rotate_sessions=bool(row['rotate_sessions']), rotate_every=row['rotate_every'],
             use_proxy=bool(row['use_proxy']), available_sessions=available_sessions,
-            failed_sessions=failed_sessions, created_at=row['created_at'],
-            updated_at=row['updated_at'], error_message=row['error_message'],
+            failed_sessions=failed_sessions,
+            created_at=row['created_at'], updated_at=row['updated_at'],
+            error_message=row['error_message'],
             filter_contacts=bool(row['filter_contacts']) if 'filter_contacts' in row.keys() else False,
             remove_contacts=bool(row['remove_contacts']) if 'remove_contacts' in row.keys() else False,
             skip_on_contacts=bool(row['skip_on_contacts']) if 'skip_on_contacts' in row.keys() else False,
+            media_filter=row['media_filter'] if 'media_filter' in row.keys() else 'all',
+            last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
+            current_session=row['current_session'] if 'current_session' in row.keys() else None,
             use_native_forward=bool(row['use_native_forward']) if 'use_native_forward' in row.keys() else False,
             check_content_if_native=bool(row['check_content_if_native']) if 'check_content_if_native' in row.keys() else True,
             forward_show_source=bool(row['forward_show_source']) if 'forward_show_source' in row.keys() else True,
-            last_action_time=row['last_action_time'] if 'last_action_time' in row.keys() else None,
-            current_session=row['current_session'] if 'current_session' in row.keys() else None,
-            media_filter=row['media_filter'] if 'media_filter' in row.keys() else 'all',
-            keywords_whitelist=row['keywords_whitelist'].split(',') if 'keywords_whitelist' in row.keys() and row['keywords_whitelist'] else [],
-            keywords_blacklist=row['keywords_blacklist'].split(',') if 'keywords_blacklist' in row.keys() and row['keywords_blacklist'] else [],
             add_signature=bool(row['add_signature']) if 'add_signature' in row.keys() else False,
-            signature_options=sig_opts
+            signature_options=sig_opts,
+            keywords_whitelist=keywords_whitelist,
+            keywords_blacklist=keywords_blacklist,
+            last_heartbeat=row['last_heartbeat'] if 'last_heartbeat' in row.keys() else None,
+            worker_phase=row['worker_phase'] if 'worker_phase' in row.keys() else None,
+            validated_sessions=row['validated_sessions'].split(',') if 'validated_sessions' in row.keys() and row['validated_sessions'] else [],
+            validation_errors=json.loads(row['validation_errors']) if 'validation_errors' in row.keys() and row['validation_errors'] else None
         )
-

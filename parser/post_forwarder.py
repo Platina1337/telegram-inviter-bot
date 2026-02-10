@@ -38,8 +38,53 @@ class PostForwarder:
         self._monitoring_tasks: Dict[int, asyncio.Task] = {}  # task_id -> asyncio.Task
         self._monitoring_handlers: Dict[int, Callable] = {}  # task_id -> handler
         self._stop_flags: Dict[int, bool] = {}  # task_id -> should_stop
+        self._last_heartbeat: Dict[int, datetime] = {}  # task_id -> last heartbeat time
+        
         
         logger.info("[POST_FORWARDER] PostForwarder initialized")
+    
+    async def _update_heartbeat_if_needed(self, task_id: int):
+        """Update last_heartbeat for task if needed (every 60s)."""
+        now = datetime.now()
+        last_hb = self._last_heartbeat.get(task_id)
+        
+        # Check if 60 seconds passed
+        if not last_hb or (now - last_hb).total_seconds() > 20:
+            self._last_heartbeat[task_id] = now
+            timestamp = now.isoformat()
+            
+            # Since PostForwarder handles both parse and monitoring tasks,
+            # we need to know which type it is.
+            # But wait, run_post_parse_task and run_post_monitoring_task are separate methods.
+            # So I should probably just call separate update queries inside those methods or pass checks.
+            # Let's define generic update here and separate specific calls inside.
+            # Actually, I can pass task_type argument or handle it inside the caller.
+            # But the caller is _run_post_parse_task or _run_post_monitoring_task.
+            
+            # It's cleaner to have separate methods or pass type.
+            pass
+
+    async def _update_heartbeat_parse(self, task_id: int):
+        """Update last_heartbeat for parse task."""
+        now = datetime.now()
+        last_hb = self._last_heartbeat.get(task_id)
+        if not last_hb or (now - last_hb).total_seconds() > 20:
+            self._last_heartbeat[task_id] = now
+            try:
+                await self.db.update_post_parse_task(task_id, last_heartbeat=now.isoformat())
+            except Exception as e:
+                logger.warning(f"[POST_FORWARDER] Failed to update parse task heartbeat: {e}")
+
+    async def _update_heartbeat_monitoring(self, task_id: int):
+        """Update last_heartbeat for monitoring task."""
+        now = datetime.now()
+        last_hb = self._last_heartbeat.get(task_id)
+        if not last_hb or (now - last_hb).total_seconds() > 20:
+            self._last_heartbeat[task_id] = now
+            try:
+                await self.db.update_post_monitoring_task(task_id, last_heartbeat=now.isoformat())
+            except Exception as e:
+                logger.warning(f"[POST_FORWARDER] Failed to update monitoring task heartbeat: {e}")
     
     async def _get_client(self, session_alias: str, use_proxy: bool = True) -> Optional[Client]:
         """Get Pyrogram client for the given session."""
@@ -387,17 +432,44 @@ class PostForwarder:
     
     async def start_post_parse_task(self, task_id: int) -> bool:
         """Start a post parsing task."""
+        import json
         logger.info(f"[POST_FORWARDER] Starting post parse task {task_id}")
         
         if task_id in self._parse_tasks:
             logger.warning(f"[POST_FORWARDER] Task {task_id} already running")
             return False
-        
+            
         task = await self.db.get_post_parse_task(task_id)
         if not task:
             logger.error(f"[POST_FORWARDER] Task {task_id} not found")
             return False
+            
+        # Validate sessions
+        logger.info(f"[POST_FORWARDER] Validating sessions for post parse task {task_id}...")
+        validation_result = await self.session_manager.validate_sessions_for_task('post_parse', task)
+        valid_sessions = validation_result['valid']
+        validation_errors = validation_result['invalid']
         
+        await self.db.update_post_parse_task(
+            task_id, 
+            validated_sessions=valid_sessions,
+            validation_errors=json.dumps(validation_errors) if validation_errors else None
+        )
+        
+        if not valid_sessions:
+            logger.error(f"[POST_FORWARDER] Task {task_id} failed validation: No valid sessions. Errors: {validation_errors}")
+            await self.db.update_post_parse_task(task_id, status='failed', error_message="No valid sessions found.")
+            return False
+
+        # Switch session if needed
+        if task.available_sessions and task.session_alias not in valid_sessions:
+            if valid_sessions:
+                new_session = valid_sessions[0]
+                logger.info(f"[POST_FORWARDER] Switching task {task_id} to valid session: {new_session}")
+                await self.db.update_post_parse_task(task_id, session_alias=new_session, current_session=new_session)
+            else:
+                return False
+
         self._stop_flags[task_id] = False
         self._parse_tasks[task_id] = asyncio.create_task(
             self._run_post_parse_task(task_id)
@@ -442,15 +514,55 @@ class PostForwarder:
             await self.db.update_post_parse_task(task_id, status='running')
             
             session_alias = task.session_alias
-            available_sessions = task.available_sessions or [session_alias]
-            current_session_idx = 0
-            failed_sessions = list(task.failed_sessions) if task.failed_sessions else []
+            candidates = task.validated_sessions if task.validated_sessions else task.available_sessions
+            available_sessions = candidates or [session_alias]
+            failed_sessions = list(getattr(task, "failed_sessions", []) or [])
+            # Try to connect (with rotation if first fails)
+            client = None
+            found_initial_session = False
             
-            client = await self._get_client(session_alias, task.use_proxy)
-            if not client:
-                error_msg = f"Не удалось подключить сессию '{session_alias}'"
+            # Find start index
+            if session_alias in available_sessions:
+                current_session_idx = available_sessions.index(session_alias)
+            else:
+                current_session_idx = 0
+                
+            start_idx = current_session_idx
+            
+            for i in range(len(available_sessions)):
+                idx = (start_idx + i) % len(available_sessions)
+                candidate_alias = available_sessions[idx]
+                
+                # Check if session is explicitly failed (skip only if we have others to try, or just try anyway?)
+                # User logic: "Skip known bad sessions if needed"
+                if failed_sessions and candidate_alias in failed_sessions:
+                    # If all are failed, we might want to try anyway or just fail? 
+                    # Let's try to skip, but if we loop 360 and find nothing, we fail.
+                    logger.info(f"[POST_FORWARDER] Skipping failed session {candidate_alias} during init")
+                    continue
+                
+                logger.info(f"[POST_FORWARDER] Task {task_id}: Trying session {candidate_alias}...")
+                client = await self._get_client(candidate_alias, task.use_proxy)
+                
+                if client:
+                    session_alias = candidate_alias
+                    current_session_idx = idx
+                    found_initial_session = True
+                    logger.info(f"[POST_FORWARDER] Connected to session {session_alias}")
+                    break
+                else:
+                    logger.warning(f"[POST_FORWARDER] Failed to connect to session {candidate_alias}")
+                    if candidate_alias not in failed_sessions:
+                        failed_sessions.append(candidate_alias)
+            
+            # If still no client (e.g. all were in failed_sessions or all connection attempts failed)
+            if not found_initial_session:
+                # One last desperate try: if we skipped everything because they were in failed_sessions, 
+                # maybe we should have tried them? 
+                # But for now let's stick to the logic: if all failed, fail task.
+                error_msg = f"Не удалось подключить ни одну из {len(available_sessions)} сессий"
                 await self.db.update_post_parse_task(
-                    task_id, status='failed', error_message=error_msg
+                    task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
                 )
                 await self._notify_user(
                     task.user_id,
@@ -500,6 +612,10 @@ class PostForwarder:
                 history_exhausted = False
                 
                 while not self._stop_flags.get(task_id):
+                    # Update heartbeat and phase
+                    await self._update_heartbeat_parse(task_id)
+                    await self.db.update_post_parse_task(task_id, worker_phase='forwarding')
+
                     # Check if limit already reached
                     if task.limit and forwarded_count >= task.limit:
                         logger.info(
@@ -903,27 +1019,66 @@ class PostForwarder:
                                 break
                             
                             # Apply delay (by posts, not messages)
-                            if posts_since_delay >= task.delay_every:
+                            if task.delay_every > 0 and posts_since_delay >= task.delay_every:
+                                if task.delay_seconds > 0:
+                                    await self.db.update_post_parse_task(task_id, worker_phase='sleeping')
+                                    await asyncio.sleep(task.delay_seconds)
+                                    await self.db.update_post_parse_task(task_id, worker_phase='forwarding')
+                                posts_since_delay = 0
+                            elif task.delay_every == 0 and task.delay_seconds > 0:
+                                # Fallback if delay_every is 0 but delay_seconds > 0 (delay every post?)
+                                # Assuming delay_every=0 means no delay in logic usually, but let's be safe
+                                await self.db.update_post_parse_task(task_id, worker_phase='sleeping')
                                 await asyncio.sleep(task.delay_seconds)
+                                await self.db.update_post_parse_task(task_id, worker_phase='forwarding')
                                 posts_since_delay = 0
                             
                             # Rotate session (by posts, not messages)
                             if task.rotate_sessions and task.rotate_every > 0:
                                 if posts_since_rotate >= task.rotate_every:
+                                    logger.info(f"[POST_FORWARDER] Task {task_id}: Rotation triggered (limit {task.rotate_every} posts)")
                                     await self._release_client(session_alias)
-                                    current_session_idx = (current_session_idx + 1) % len(available_sessions)
-                                    session_alias = available_sessions[current_session_idx]
-                                    client = await self._get_client(session_alias, task.use_proxy)
-                                    if not client:
-                                        raise Exception(f"Could not connect to session {session_alias}")
-                                    posts_since_rotate = 0
                                     
-                                    # Update current session in DB
-                                    await self.db.update_post_parse_task(
-                                        task_id,
-                                        current_session=session_alias
-                                    )
-                                    logger.info(f"[POST_FORWARDER] Rotated to session {session_alias}")
+                                    found_new_session = False
+                                    start_idx = (current_session_idx + 1) % len(available_sessions)
+                                    
+                                    # Try all sessions starting from next
+                                    for i in range(len(available_sessions)):
+                                        idx = (start_idx + i) % len(available_sessions)
+                                        candidate_alias = available_sessions[idx]
+                                        
+                                        # Skip known bad sessions if needed (optional)
+                                        if task.failed_sessions and candidate_alias in task.failed_sessions:
+                                            continue
+
+                                        # Try to connect
+                                        logger.info(f"[POST_FORWARDER] Task {task_id}: Trying session {candidate_alias} for rotation...")
+                                        new_client = await self._get_client(candidate_alias, task.use_proxy)
+                                        if new_client:
+                                            # Success
+                                            current_session_idx = idx
+                                            session_alias = candidate_alias
+                                            client = new_client
+                                            posts_since_rotate = 0
+                                            found_new_session = True
+                                            
+                                            # Update DB
+                                            await self.db.update_post_parse_task(
+                                                task_id,
+                                                current_session=session_alias
+                                            )
+                                            logger.info(f"[POST_FORWARDER] Rotated to session {session_alias}")
+                                            break
+                                        else:
+                                            logger.warning(f"[POST_FORWARDER] Task {task_id}: Session {candidate_alias} failed to connect during rotation")
+                                    
+                                    if not found_new_session:
+                                        error_msg = "Не удалось подключить ни одну сессию при ротации"
+                                        await self.db.update_post_parse_task(
+                                            task_id, status='failed', error_message=error_msg
+                                        )
+                                        await self._notify_user(task.user_id, f"❌ **Задача остановлена**\n\n{error_msg}")
+                                        return
                 
                 # Task completed — обновляем статус и уведомляем пользователя (как в инвайтинге)
                 completion_reason = (
@@ -1218,6 +1373,7 @@ class PostForwarder:
     
     async def start_post_monitoring_task(self, task_id: int) -> bool:
         """Start a post monitoring task."""
+        import json
         logger.info(f"[POST_FORWARDER] Starting post monitoring task {task_id}")
         
         if task_id in self._monitoring_tasks:
@@ -1228,6 +1384,32 @@ class PostForwarder:
         if not task:
             logger.error(f"[POST_FORWARDER] Monitoring task {task_id} not found")
             return False
+            
+        # Validate sessions
+        logger.info(f"[POST_FORWARDER] Validating sessions for post monitoring task {task_id}...")
+        validation_result = await self.session_manager.validate_sessions_for_task('post_monitoring', task)
+        valid_sessions = validation_result['valid']
+        validation_errors = validation_result['invalid']
+        
+        await self.db.update_post_monitoring_task(
+            task_id, 
+            validated_sessions=valid_sessions,
+            validation_errors=json.dumps(validation_errors) if validation_errors else None
+        )
+        
+        if not valid_sessions:
+            logger.error(f"[POST_FORWARDER] Task {task_id} failed validation: No valid sessions. Errors: {validation_errors}")
+            await self.db.update_post_monitoring_task(task_id, status='failed', error_message="No valid sessions found.")
+            return False
+
+        # Switch session if needed
+        if task.available_sessions and task.session_alias not in valid_sessions:
+            if valid_sessions:
+                new_session = valid_sessions[0]
+                logger.info(f"[POST_FORWARDER] Switching task {task_id} to valid session: {new_session}")
+                await self.db.update_post_monitoring_task(task_id, session_alias=new_session, current_session=new_session)
+            else:
+                return False
         
         self._stop_flags[task_id] = False
         self._monitoring_tasks[task_id] = asyncio.create_task(
@@ -1277,16 +1459,49 @@ class PostForwarder:
             
             # Session rotation setup
             session_alias = task.session_alias
-            available_sessions = task.available_sessions or [session_alias]
+            candidates = task.validated_sessions if task.validated_sessions else task.available_sessions
+            available_sessions = candidates or [session_alias]
             current_session_idx = available_sessions.index(session_alias) if session_alias in available_sessions else 0
             failed_sessions = list(task.failed_sessions) if task.failed_sessions else []
             
-            client = await self._get_client(session_alias, task.use_proxy)
+            # Try to connect (with rotation if first fails)
+            client = None
+            found_initial_session = False
             
-            if not client:
-                error_msg = f"Не удалось подключить сессию '{session_alias}'"
+            # Ensure index is correct
+            if session_alias in available_sessions:
+                current_session_idx = available_sessions.index(session_alias)
+            else:
+                current_session_idx = 0
+                
+            start_idx = current_session_idx
+            
+            for i in range(len(available_sessions)):
+                idx = (start_idx + i) % len(available_sessions)
+                candidate_alias = available_sessions[idx]
+                
+                if failed_sessions and candidate_alias in failed_sessions:
+                    logger.info(f"[POST_FORWARDER] Skipping failed session {candidate_alias} during init (monitoring)")
+                    continue
+                
+                logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Trying session {candidate_alias}...")
+                client = await self._get_client(candidate_alias, task.use_proxy)
+                
+                if client:
+                    session_alias = candidate_alias
+                    current_session_idx = idx
+                    found_initial_session = True
+                    logger.info(f"[POST_FORWARDER] Monitoring connected to session {session_alias}")
+                    break
+                else:
+                    logger.warning(f"[POST_FORWARDER] Failed to connect to session {candidate_alias}")
+                    if candidate_alias not in failed_sessions:
+                        failed_sessions.append(candidate_alias)
+                        
+            if not found_initial_session:
+                error_msg = f"Не удалось подключить ни одну из {len(available_sessions)} сессий для мониторинга"
                 await self.db.update_post_monitoring_task(
-                    task_id, status='failed', error_message=error_msg
+                    task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
                 )
                 await self._notify_user(
                     task.user_id,
@@ -1490,17 +1705,47 @@ class PostForwarder:
                     
                     # Session rotation by posts
                     if task.rotate_sessions and task.rotate_every > 0 and posts_since_rotate >= task.rotate_every:
-                        await self._rotate_monitoring_session(
-                            task_id, task, client, session_alias,
-                            available_sessions, failed_sessions, current_session_idx
-                        )
-                        # Update local variables after rotation
-                        current_session_idx = (current_session_idx + 1) % len(available_sessions)
-                        session_alias = available_sessions[current_session_idx]
-                        client = await self._get_client(session_alias, task.use_proxy)
-                        if not client:
-                            raise Exception(f"Could not connect to session {session_alias} after rotation")
-                        posts_since_rotate = 0
+                        logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Rotation triggered (limit {task.rotate_every} posts)")
+                        await self._release_client(session_alias)
+                        
+                        found_new_session = False
+                        start_idx = (current_session_idx + 1) % len(available_sessions)
+                        
+                        # Try all sessions starting from next
+                        for i in range(len(available_sessions)):
+                            idx = (start_idx + i) % len(available_sessions)
+                            candidate_alias = available_sessions[idx]
+                            
+                            if candidate_alias in failed_sessions:
+                                continue
+                                
+                            logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Trying session {candidate_alias} for rotation...")
+                            new_client = await self._get_client(candidate_alias, task.use_proxy)
+                            if new_client:
+                                current_session_idx = idx
+                                session_alias = candidate_alias
+                                client = new_client
+                                posts_since_rotate = 0
+                                found_new_session = True
+                                
+                                await self.db.update_post_monitoring_task(
+                                    task_id,
+                                    current_session=session_alias
+                                )
+                                logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Rotated to session {session_alias}")
+                                break
+                            else:
+                                 if candidate_alias not in failed_sessions:
+                                     failed_sessions.append(candidate_alias)
+                        
+                        if not found_new_session:
+                            error_msg = "Не удалось подключить ни одну сессию при ротации (мониторинг)"
+                            await self.db.update_post_monitoring_task(
+                                task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
+                            )
+                            await self._notify_user(task.user_id, f"❌ **Задача мониторинга остановлена**\n\n{error_msg}")
+                            self._stop_flags[task_id] = True
+                            return
                     
                     if task.delay_seconds > 0:
                         await asyncio.sleep(task.delay_seconds)
@@ -1515,18 +1760,51 @@ class PostForwarder:
                     else:
                         logger.error(f"[POST_FORWARDER] Error forwarding media group: {e}")
                         
-                        # Rotate session on error
-                        if task.rotate_sessions and len(available_sessions) > 1:
+                        # Rotate session on error (Robust iteration)
+                        if task.rotate_sessions and len(available_sessions) > 0:
+                            logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Error forwarding ({e}), attempting rotation...")
+                            
+                            # Mark current as failed
                             if session_alias not in failed_sessions:
                                 failed_sessions.append(session_alias)
                             
                             await self._release_client(session_alias)
-                            current_session_idx = (current_session_idx + 1) % len(available_sessions)
-                            session_alias = available_sessions[current_session_idx]
                             
-                            # Check if all sessions failed
-                            if len(failed_sessions) >= len(available_sessions):
-                                error_msg = "Все сессии дали ошибку при пересылке"
+                            found_recovery_session = False
+                            start_idx = (current_session_idx + 1) % len(available_sessions)
+                            
+                            # Iterate all sessions to find a working one
+                            for i in range(len(available_sessions)):
+                                idx = (start_idx + i) % len(available_sessions)
+                                candidate_alias = available_sessions[idx]
+                                
+                                # Skip already failed unless we want to retry logic (but usually failed means failed)
+                                if candidate_alias in failed_sessions:
+                                    continue
+                                
+                                logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Trying recovery session {candidate_alias}...")
+                                new_client = await self._get_client(candidate_alias, task.use_proxy)
+                                if new_client:
+                                    current_session_idx = idx
+                                    session_alias = candidate_alias
+                                    client = new_client
+                                    found_recovery_session = True
+                                    
+                                    await self.db.update_post_monitoring_task(
+                                        task_id,
+                                        current_session=session_alias,
+                                        failed_sessions=failed_sessions
+                                    )
+                                    logger.info(f"[POST_FORWARDER] Recovered with session {session_alias}")
+                                    break
+                                else:
+                                    # Failed to connect
+                                    if candidate_alias not in failed_sessions:
+                                        failed_sessions.append(candidate_alias)
+                            
+                            if not found_recovery_session:
+                                # All failed
+                                error_msg = f"Все сессии недоступны или дали ошибку. Посл. ошибка: {e}"
                                 await self.db.update_post_monitoring_task(
                                     task_id,
                                     status='failed',
@@ -1539,15 +1817,6 @@ class PostForwarder:
                                 )
                                 self._stop_flags[task_id] = True
                                 return
-                            
-                            client = await self._get_client(session_alias, task.use_proxy)
-                            if client:
-                                await self.db.update_post_monitoring_task(
-                                    task_id,
-                                    current_session=session_alias,
-                                    failed_sessions=failed_sessions
-                                )
-                                logger.info(f"[POST_FORWARDER] Rotated to session {session_alias} after error")
                 
                 finally:
                     # Cleanup buffer
@@ -1560,7 +1829,12 @@ class PostForwarder:
             async def new_message_handler(_, message: PyrogramMessage):
                 nonlocal forwarded_count, posts_since_rotate, client, session_alias, current_session_idx
                 
+                # Если задача уже остановлена/отменена, игнорируем любые новые сообщения
                 if self._stop_flags.get(task_id):
+                    logger.info(
+                        f"[POST_FORWARDER] Monitoring task {task_id}: "
+                        f"Received message {getattr(message, 'id', 'unknown')} after stop flag set, skipping"
+                    )
                     return
                 
                 # Deduplication check
@@ -1730,20 +2004,52 @@ class PostForwarder:
                     
                     # Session rotation by posts
                     if task.rotate_sessions and task.rotate_every > 0 and posts_since_rotate >= task.rotate_every:
-                        await self._rotate_monitoring_session(
-                            task_id, task, client, session_alias,
-                            available_sessions, failed_sessions, current_session_idx
-                        )
-                        # Update local variables after rotation
-                        current_session_idx = (current_session_idx + 1) % len(available_sessions)
-                        session_alias = available_sessions[current_session_idx]
-                        client = await self._get_client(session_alias, task.use_proxy)
-                        if not client:
-                            raise Exception(f"Could not connect to session {session_alias} after rotation")
-                        posts_since_rotate = 0
+                        logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Rotation triggered (limit {task.rotate_every} posts)")
+                        await self._release_client(session_alias)
+                        
+                        found_new_session = False
+                        start_idx = (current_session_idx + 1) % len(available_sessions)
+                        
+                        for i in range(len(available_sessions)):
+                            idx = (start_idx + i) % len(available_sessions)
+                            candidate_alias = available_sessions[idx]
+                            
+                            if candidate_alias in failed_sessions:
+                                continue
+                                
+                            logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Trying session {candidate_alias} for rotation...")
+                            new_client = await self._get_client(candidate_alias, task.use_proxy)
+                            if new_client:
+                                current_session_idx = idx
+                                session_alias = candidate_alias
+                                client = new_client
+                                posts_since_rotate = 0
+                                found_new_session = True
+                                
+                                await self.db.update_post_monitoring_task(
+                                    task_id,
+                                    current_session=session_alias
+                                    # failed_sessions not updated here typically
+                                )
+                                logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Rotated to session {session_alias}")
+                                break
+                            else:
+                                if candidate_alias not in failed_sessions:
+                                    failed_sessions.append(candidate_alias)
+                        
+                        if not found_new_session:
+                            error_msg = "Не удалось подключить ни одну сессию при ротации (мониторинг)"
+                            await self.db.update_post_monitoring_task(
+                                task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
+                            )
+                            await self._notify_user(task.user_id, f"❌ **Задача мониторинга остановлена**\n\n{error_msg}")
+                            self._stop_flags[task_id] = True
+                            return
                     
                     if task.delay_seconds > 0:
+                        await self.db.update_post_monitoring_task(task_id, worker_phase='sleeping')
                         await asyncio.sleep(task.delay_seconds)
+                        await self.db.update_post_monitoring_task(task_id, worker_phase='monitoring')
                 
                 except Exception as e:
                     err_str = str(e)
@@ -1755,18 +2061,46 @@ class PostForwarder:
                     else:
                         logger.error(f"[POST_FORWARDER] Error in monitoring handler: {e}")
                         
-                        # Rotate session on error
-                        if task.rotate_sessions and len(available_sessions) > 1:
+                        # Rotate session on error (Robust iteration)
+                        if task.rotate_sessions and len(available_sessions) > 0:
+                            logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Error forwarding ({e}), attempting rotation...")
+                            
                             if session_alias not in failed_sessions:
                                 failed_sessions.append(session_alias)
                             
                             await self._release_client(session_alias)
-                            current_session_idx = (current_session_idx + 1) % len(available_sessions)
-                            session_alias = available_sessions[current_session_idx]
                             
-                            # Check if all sessions failed
-                            if len(failed_sessions) >= len(available_sessions):
-                                error_msg = "Все сессии дали ошибку при пересылке"
+                            found_recovery_session = False
+                            start_idx = (current_session_idx + 1) % len(available_sessions)
+                            
+                            for i in range(len(available_sessions)):
+                                idx = (start_idx + i) % len(available_sessions)
+                                candidate_alias = available_sessions[idx]
+                                
+                                if candidate_alias in failed_sessions:
+                                    continue
+                                
+                                logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Trying recovery session {candidate_alias}...")
+                                new_client = await self._get_client(candidate_alias, task.use_proxy)
+                                if new_client:
+                                    current_session_idx = idx
+                                    session_alias = candidate_alias
+                                    client = new_client
+                                    found_recovery_session = True
+                                    
+                                    await self.db.update_post_monitoring_task(
+                                        task_id,
+                                        current_session=session_alias,
+                                        failed_sessions=failed_sessions
+                                    )
+                                    logger.info(f"[POST_FORWARDER] Recovered with session {session_alias}")
+                                    break
+                                else:
+                                    if candidate_alias not in failed_sessions:
+                                        failed_sessions.append(candidate_alias)
+                            
+                            if not found_recovery_session:
+                                error_msg = f"Все сессии недоступны или дали ошибку. Посл. ошибка: {e}"
                                 await self.db.update_post_monitoring_task(
                                     task_id,
                                     status='failed',
@@ -1779,15 +2113,6 @@ class PostForwarder:
                                 )
                                 self._stop_flags[task_id] = True
                                 return
-                            
-                            client = await self._get_client(session_alias, task.use_proxy)
-                            if client:
-                                await self.db.update_post_monitoring_task(
-                                    task_id,
-                                    current_session=session_alias,
-                                    failed_sessions=failed_sessions
-                                )
-                                logger.info(f"[POST_FORWARDER] Rotated to session {session_alias} after error")
             
             # Register handler
             from pyrogram import filters
@@ -1798,7 +2123,10 @@ class PostForwarder:
             logger.info(f"[POST_FORWARDER] Monitoring started for source {task.source_id}")
             
             # Keep running until stopped
+            await self.db.update_post_monitoring_task(task_id, worker_phase='monitoring')
             while not self._stop_flags.get(task_id):
+                # Update heartbeat
+                await self._update_heartbeat_monitoring(task_id)
                 await asyncio.sleep(1)
                 
                 # Check if limit reached
@@ -1847,8 +2175,9 @@ class PostForwarder:
                 del self._monitoring_handlers[task_id]
             if task_id in self._monitoring_tasks:
                 del self._monitoring_tasks[task_id]
-            if task_id in self._stop_flags:
-                del self._stop_flags[task_id]
+            # Явно помечаем задачу как остановленную, чтобы обработчик сообщений
+            # больше никогда не пересылал новые посты, даже если хэндлер ещё жив
+            self._stop_flags[task_id] = True
             if session_alias:
                 await self._release_client(session_alias)
 

@@ -71,6 +71,10 @@ class InviteTask:
     # Timing and session tracking
     last_action_time: Optional[str] = None  # ISO timestamp of last invite action
     current_session: Optional[str] = None  # Currently active session (for rotation tracking)
+    last_heartbeat: Optional[str] = None  # ISO timestamp of last worker heartbeat
+    worker_phase: Optional[str] = None  # Current phase of worker (sleeping, inviting, etc)
+    validated_sessions: List[str] = field(default_factory=list)  # Sessions that passed pre-start validation
+    validation_errors: Optional[Dict[str, str]] = None  # Validation errors by alias
 
 
 
@@ -132,6 +136,10 @@ class ParseTask:
     # Timing and session tracking
     last_action_time: Optional[str] = None  # ISO timestamp of last parse action
     current_session: Optional[str] = None  # Currently active session (for rotation tracking)
+    last_heartbeat: Optional[str] = None
+    worker_phase: Optional[str] = None
+    validated_sessions: List[str] = field(default_factory=list)
+    validation_errors: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -185,6 +193,10 @@ class PostParseTask:
     # Keyword filters
     keywords_whitelist: List[str] = field(default_factory=list)
     keywords_blacklist: List[str] = field(default_factory=list)
+    last_heartbeat: Optional[str] = None
+    worker_phase: Optional[str] = None
+    validated_sessions: List[str] = field(default_factory=list)
+    validation_errors: Optional[Dict[str, str]] = None
 
 @dataclass
 class PostMonitoringTask:
@@ -229,4 +241,8 @@ class PostMonitoringTask:
     # Keyword filters
     keywords_whitelist: List[str] = field(default_factory=list)
     keywords_blacklist: List[str] = field(default_factory=list)
+    last_heartbeat: Optional[str] = None
+    worker_phase: Optional[str] = None
+    validated_sessions: List[str] = field(default_factory=list)
+    validation_errors: Optional[Dict[str, str]] = None
 

@@ -140,6 +140,7 @@ class SessionManager:
         self.db = db
         self.session_dir = session_dir or config.SESSIONS_DIR
         self.clients: Dict[str, Client] = {}
+        self._last_client_error: Dict[str, str] = {}  # alias -> last error when get_client failed
         self.ensure_session_dir()
     
     def ensure_session_dir(self):
@@ -303,6 +304,7 @@ class SessionManager:
         
         session = await self.db.get_session_by_alias(alias)
         if not session:
+            self._last_client_error[alias] = "Сессия не найдена в базе"
             return None
             
         # Determine target proxy configuration
@@ -378,9 +380,8 @@ class SessionManager:
                     logger.info(f"Запущена сессия: {alias}{proxy_str}")
                 except asyncio.TimeoutError:
                     # Connection timeout - likely bad proxy
-                    error_msg = f"Таймаут подключения ({connection_timeout}с) для сессии {alias}{proxy_str}. Прокси недоступен или неверен."
-                    logger.error(error_msg)
-                    # Clean up failed client
+                    error_msg = f"Таймаут подключения ({connection_timeout}с). Прокси недоступен или неверен."
+                    logger.error(f"Таймаут подключения ({connection_timeout}с) для сессии {alias}{proxy_str}. Прокси недоступен или неверен.")
                     if alias in self.clients:
                         try:
                             if self.clients[alias].is_connected:
@@ -388,36 +389,45 @@ class SessionManager:
                         except:
                             pass
                         del self.clients[alias]
+                    self._last_client_error[alias] = error_msg
                     return None
                     
             except OSError as e:
-                # Network/proxy connection error
-                error_msg = f"Ошибка сети при подключении сессии {alias}{proxy_str}: {e}"
-                logger.error(error_msg)
+                error_msg = f"Ошибка сети: {e}"
+                logger.error(f"Ошибка сети при подключении сессии {alias}{proxy_str}: {e}")
                 if alias in self.clients:
                     del self.clients[alias]
+                self._last_client_error[alias] = error_msg
                 return None
             except ConnectionError as e:
-                # Proxy connection refused
-                error_msg = f"Ошибка подключения к прокси для сессии {alias}{proxy_str}: {e}"
-                logger.error(error_msg)
+                error_msg = f"Прокси отклонил подключение: {e}"
+                logger.error(f"Ошибка подключения к прокси для сессии {alias}{proxy_str}: {e}")
                 if alias in self.clients:
                     del self.clients[alias]
+                self._last_client_error[alias] = error_msg
+                return None
+            except (AuthKeyUnregistered, AuthKeyDuplicated) as e:
+                error_msg = "Сессия отозвана или сброшена в Telegram. Нужно заново войти в аккаунт."
+                logger.error(f"Сессия {alias}: {e}")
+                if alias in self.clients:
+                    del self.clients[alias]
+                self._last_client_error[alias] = error_msg
                 return None
             except Exception as e:
                 error_str = str(e).lower()
-                # Check for common proxy errors in exception message
                 if "proxy" in error_str or "socks" in error_str or "connect" in error_str or "network" in error_str:
-                    error_msg = f"Не удалось подключиться через прокси для сессии {alias}{proxy_str}: {e}"
-                    logger.error(error_msg)
+                    error_msg = f"Прокси/сеть: {e}"
+                elif "auth" in error_str or "session" in error_str or "invalid" in error_str:
+                    error_msg = f"Сессия или авторизация: {e}"
                 else:
-                    error_msg = f"Не удалось запустить сессию {alias}{proxy_str}: {e}"
-                    logger.error(error_msg)
-                    
+                    error_msg = f"Ошибка запуска: {e}"
+                logger.error(f"Не удалось запустить сессию {alias}{proxy_str}: {e}")
                 if alias in self.clients:
                     del self.clients[alias]
+                self._last_client_error[alias] = error_msg
                 return None
         
+        self._last_client_error.pop(alias, None)
         return client
     
     async def set_session_proxy(self, alias: str, proxy_str: str) -> Dict[str, Any]:
@@ -1050,3 +1060,127 @@ class SessionManager:
         
         logger.warning("No suitable session found for inviting")
         return None
+
+    async def validate_sessions_for_task(self, task_type: str, task: Any) -> Dict[str, Any]:
+        """
+        Validate sessions for a task (pre-start check).
+        Checks if sessions have access to source/target chats.
+        
+        Args:
+            task_type: 'invite', 'parse', 'post_parse', 'post_monitoring'
+            task: Task object with fields: available_sessions, source_id/group_id, etc.
+            
+        Returns:
+            Dict with 'valid': List[str], 'invalid': Dict[str, str] (alias -> error)
+        """
+        valid = []
+        invalid = {}
+        
+        # Determine sessions to check
+        sessions_to_check = task.available_sessions if task.available_sessions else []
+        if not sessions_to_check:
+             # Try to load if simple string
+             if isinstance(task.available_sessions, str):
+                 sessions_to_check = task.available_sessions.split(',')
+             else:
+                 return {"valid": [], "invalid": {"global": "No sessions assigned"}}
+
+        for alias in sessions_to_check:
+            if not alias: continue
+            
+            try:
+                # Use proxy from task if available, or default
+                use_proxy = getattr(task, 'use_proxy', True)
+                client = await self.get_client(alias, use_proxy=use_proxy)
+                
+                if not client:
+                    invalid[alias] = self._last_client_error.get(
+                        alias,
+                        "Сессия не подключена (не удалось инициализировать)"
+                    )
+                    continue
+                
+                # Check connection
+                if not client.is_connected:
+                    try:
+                        # Start with quick timeout just to check
+                        # But get_client usually starts it. 
+                        # If get_client returned valid object but not connected, try start
+                        await client.start()
+                    except Exception as e:
+                        invalid[alias] = f"Connection failed: {e}"
+                        if client.is_connected: # cleanup if partially started
+                             try: await client.stop() 
+                             except: pass
+                        continue
+                
+                # Validation based on task type
+                if task_type == 'invite':
+                    # Source check (only if not file mode)
+                    if getattr(task, 'invite_mode', 'member_list') != 'from_file':
+                         src_id = task.source_group_id
+                         src_user = task.source_username
+                         src = await ensure_peer_resolved(client, src_id, src_user)
+                         if not src:
+                             invalid[alias] = f"No access to source group {src_id}"
+                             continue
+                         await self.join_chat_if_needed(client, src_id, src_user)
+                    
+                    # Target check
+                    dst_id = task.target_group_id
+                    dst_user = task.target_username
+                    dst = await ensure_peer_resolved(client, dst_id, dst_user)
+                    if not dst:
+                        invalid[alias] = f"No access to target group {dst_id}"
+                        continue
+                    await self.join_chat_if_needed(client, dst_id, dst_user)
+                    
+                elif task_type == 'parse':
+                    # Source check
+                    src_id = task.source_group_id
+                    src_user = task.source_username
+                    src = await ensure_peer_resolved(client, src_id, src_user)
+                    if not src:
+                        invalid[alias] = f"No access to source group {src_id}"
+                        continue
+                    await self.join_chat_if_needed(client, src_id, src_user)
+                    
+                    # Check member list visibility for member_list mode
+                    if getattr(task, 'parse_mode', 'member_list') == 'member_list':
+                        try:
+                             # Try to get 1 member to check privileges
+                             # Iterating over async generator
+                             has_members = False
+                             async for _ in client.get_chat_members(src_id, limit=1):
+                                 has_members = True
+                                 break
+                             # If we got here, we have access to members
+                        except Exception as e:
+                            invalid[alias] = f"Cannot fetch members: {e}"
+                            continue
+
+                elif task_type in ['post_parse', 'post_monitoring']:
+                    # Source check
+                    src_id = task.source_id
+                    src_user = task.source_username
+                    src = await ensure_peer_resolved(client, src_id, src_user)
+                    if not src:
+                        invalid[alias] = f"No access to source {src_id}"
+                        continue
+                    await self.join_chat_if_needed(client, src_id, src_user)
+                    
+                    # Target check
+                    dst_id = task.target_id
+                    dst_user = task.target_username
+                    dst = await ensure_peer_resolved(client, dst_id, dst_user)
+                    if not dst:
+                        invalid[alias] = f"No access to target {dst_id}"
+                        continue
+                    await self.join_chat_if_needed(client, dst_id, dst_user)
+
+                valid.append(alias)
+
+            except Exception as e:
+                invalid[alias] = str(e)
+        
+        return {"valid": valid, "invalid": invalid}

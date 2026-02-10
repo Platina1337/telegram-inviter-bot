@@ -35,23 +35,65 @@ class ParserWorker:
         """Start a parse task."""
         if task_id in self.running_tasks:
             return {"success": False, "error": "Task already running"}
+            
+        import json
         
         task = await self.db.get_parse_task(task_id)
         if not task:
             return {"success": False, "error": "Task not found"}
-        # Если текущая сессия не в списке выбранных (настройки сменили) — переключаем на первую из списка
-        if task.available_sessions and task.session_alias not in task.available_sessions:
-            await self.db.update_parse_task(
-                task_id,
-                session_alias=task.available_sessions[0],
-                current_session=task.available_sessions[0]
-            )
-            task = await self.db.get_parse_task(task_id)
+
+        # Validate sessions first
+        logger.info(f"Validating sessions for parse task {task_id}...")
+        validation_result = await self.session_manager.validate_sessions_for_task('parse', task)
+        valid_sessions = validation_result['valid']
+        validation_errors = validation_result['invalid']
         
+        # Update validation results in DB
+        await self.db.update_parse_task(
+            task_id, 
+            validated_sessions=valid_sessions,
+            validation_errors=json.dumps(validation_errors) if validation_errors else None
+        )
+        
+        if not valid_sessions:
+            logger.error(f"Task {task_id} failed validation: No valid sessions. Errors: {validation_errors}")
+            await self.db.update_parse_task(task_id, status='failed', error_message="No valid sessions found during pre-check.")
+            return {
+                "success": False, 
+                "error": "No valid sessions found. Check validation errors.", 
+                "validation_errors": validation_errors
+            }
+
+        # Update task object with new data
+        task.validated_sessions = valid_sessions
+        task.validation_errors = validation_errors
+
+        # If current session is not valid, switch to first valid
+        if task.available_sessions and task.session_alias not in valid_sessions:
+            if valid_sessions:
+                new_session = valid_sessions[0]
+                logger.info(f"Switching task {task_id} to valid session: {new_session}")
+                await self.db.update_parse_task(
+                    task_id,
+                    session_alias=new_session,
+                    current_session=new_session
+                )
+                # Reload task
+                task = await self.db.get_parse_task(task_id)
+            else:
+                 return {"success": False, "error": "No valid sessions available to switch to."}
+        
+        # Also fallback for manual available_sessions change (existing logic)
+        elif task.available_sessions and task.session_alias not in task.available_sessions:
+             # If current alias is valid but strict available_sessions changed?
+             pass
+
         # Update status
         await self.db.update_parse_task(task_id, status='running')
         
         # Initialize unsaved members storage
+        if not hasattr(self, 'task_unsaved_members'):
+             self.task_unsaved_members = {}
         self.task_unsaved_members[task_id] = []
         
         # Start task in background
@@ -69,7 +111,7 @@ class ParserWorker:
         import time
         now = time.time()
         last = self._last_heartbeat.get(task_id, 0)
-        if now - last >= 60:  # Update every 60 seconds minimum
+        if now - last >= 20:  # Update every 20 seconds
             await self.db.update_parse_task(task_id, last_heartbeat=datetime.now().isoformat())
             self._last_heartbeat[task_id] = now
             return True
@@ -255,6 +297,10 @@ class ParserWorker:
             logger.info(f"🚫 Задача {task_id} - фильтры: исключать админов={'Да' if task.filter_admins else 'Нет'}, исключать неактивных={'Да' if task.filter_inactive else 'Нет'} (> {task.inactive_threshold_days} дн.)")
             
             while True:
+                # Update heartbeat and phase
+                await self._update_heartbeat_if_needed(task_id)
+                await self.db.update_parse_task(task_id, worker_phase='parsing')
+
                 # Check if task was cancelled
                 if task_id not in self.running_tasks:
                     logger.info(f"⏹️ Задача {task_id} была отменена")
@@ -427,6 +473,7 @@ class ParserWorker:
                         if task.delay_seconds > 0 and task.delay_every > 0:
                             if total_parsed % task.delay_every == 0:
                                 logger.info(f"⏱️ Задача {task_id} - задержка {task.delay_seconds} сек после {total_parsed} обработанных пользователей")
+                                await self.db.update_parse_task(task_id, worker_phase='sleeping')
                                 await asyncio.sleep(task.delay_seconds)
                     
                     # Update offset for next batch
@@ -661,6 +708,10 @@ class ParserWorker:
             
             # Iterate through chat history
             async for message in client.get_chat_history(task.source_group_id, offset=task.messages_offset):
+                # Update heartbeat and phase
+                await self._update_heartbeat_if_needed(task_id)
+                await self.db.update_parse_task(task_id, worker_phase='parsing')
+
                 # Check if task was cancelled
                 if task_id not in self.running_tasks:
                     logger.info(f"⏹️ Задача {task_id} была отменена")
@@ -688,6 +739,7 @@ class ParserWorker:
                     # Check for delay after N requests
                     if task.delay_every_requests > 0 and api_requests_count % task.delay_every_requests == 0:
                         logger.info(f"⏱️ Задача {task_id} - задержка {task.delay_seconds} сек после {api_requests_count} запросов")
+                        await self.db.update_parse_task(task_id, worker_phase='sleeping')
                         await asyncio.sleep(task.delay_seconds)
                     
                     # Check for session rotation after N requests
@@ -1020,6 +1072,10 @@ class ParserWorker:
             
             # Iterate through channel posts
             async for post in client.get_chat_history(task.source_group_id, offset=task.messages_offset):
+                # Update heartbeat and phase
+                await self._update_heartbeat_if_needed(task_id)
+                await self.db.update_parse_task(task_id, worker_phase='parsing')
+
                 # Check if task was cancelled
                 if task_id not in self.running_tasks:
                     logger.info(f"⏹️ Задача {task_id} была отменена")
@@ -1046,6 +1102,7 @@ class ParserWorker:
                 # Check for delay after N requests
                 if task.delay_every_requests > 0 and api_requests_count % task.delay_every_requests == 0:
                     logger.info(f"⏱️ Задача {task_id} - задержка {task.delay_seconds} сек после {api_requests_count} запросов")
+                    await self.db.update_parse_task(task_id, worker_phase='sleeping')
                     await asyncio.sleep(task.delay_seconds)
                 
                 # Check for session rotation after N requests
