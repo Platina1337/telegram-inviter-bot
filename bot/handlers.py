@@ -907,39 +907,113 @@ async def show_invite_settings(client: Client, message: Message):
     )
 
 
-async def show_tasks_status(client: Client, message: Message, page: int = 0, edit_message: bool = False, user_id: int = None):
-    """Show all tasks status with pagination."""
+async def show_tasks_status(client: Client, message: Message, page: int = 0, edit_message: bool = False, user_id: int = None, status_filter: str = None, type_filter: str = None):
+    """Show all tasks status with pagination and filters.
+    
+    Args:
+        client: Pyrogram client
+        message: Message object
+        page: Current page number (0-indexed)
+        edit_message: Whether to edit existing message or send new one
+        user_id: User ID (if None, extracted from message)
+        status_filter: Filter by status ('all', 'running', 'paused', 'completed', None)
+        type_filter: Filter by task type ('all', 'invite', 'parse', 'post_parse', 'post_monitor', None)
+    """
     # Use provided user_id or get from message
     if user_id is None:
         user_id = message.from_user.id if message.from_user else message.chat.id
     
-    # Get invite tasks
-    invite_result = await api_client.get_user_tasks(user_id)
-    invite_tasks = invite_result.get('tasks', [])
-    for t in invite_tasks: t['type'] = 'invite'
+    # Get filters from user_states if not provided
+    if user_id in user_states:
+        if status_filter is None:
+            status_filter = user_states[user_id].get('tasks_status_filter', 'all')
+        if type_filter is None:
+            type_filter = user_states[user_id].get('tasks_type_filter', 'all')
     
-    # Get parse tasks
-    parse_result = await api_client.get_user_parse_tasks(user_id)
-    parse_tasks = parse_result.get('tasks', [])
-    for t in parse_tasks: t['type'] = 'parse'
+    # Default to 'all' if still None
+    status_filter = status_filter or 'all'
+    type_filter = type_filter or 'all'
     
-    # Get post parse tasks
-    post_parse_result = await api_client.get_user_post_parse_tasks(user_id)
-    post_parse_tasks = post_parse_result.get('tasks', []) if post_parse_result.get('success') else []
-    for t in post_parse_tasks: t['type'] = 'post_parse'
+    # Save filters to user_states
+    if user_id not in user_states:
+        user_states[user_id] = {}
+    user_states[user_id]['tasks_status_filter'] = status_filter
+    user_states[user_id]['tasks_type_filter'] = type_filter
+    user_states[user_id]['tasks_current_page'] = page  # Save current page
     
-    # Get post monitoring tasks
-    post_monitor_result = await api_client.get_user_post_monitoring_tasks(user_id)
-    post_monitor_tasks = post_monitor_result.get('tasks', []) if post_monitor_result.get('success') else []
-    for t in post_monitor_tasks: t['type'] = 'post_monitor'
+    # Determine API status parameter based on filter
+    api_status = None
+    if status_filter == 'running':
+        api_status = 'running'
+    elif status_filter == 'paused':
+        api_status = 'paused'
+    elif status_filter == 'completed':
+        # For 'completed' filter, we'll fetch all and filter on bot side
+        # since API doesn't support multiple statuses
+        api_status = None
     
-    # Merge all tasks and sort by created_at (most recent first)
+    # Get tasks from API (with status filter where applicable)
+    invite_tasks = []
+    parse_tasks = []
+    post_parse_tasks = []
+    post_monitor_tasks = []
+    
+    if type_filter in ['all', 'invite']:
+        invite_result = await api_client.get_user_tasks(user_id, status=api_status)
+        invite_tasks = invite_result.get('tasks', [])
+        for t in invite_tasks: t['type'] = 'invite'
+    
+    if type_filter in ['all', 'parse']:
+        parse_result = await api_client.get_user_parse_tasks(user_id, status=api_status)
+        parse_tasks = parse_result.get('tasks', [])
+        for t in parse_tasks: t['type'] = 'parse'
+    
+    if type_filter in ['all', 'post_parse']:
+        post_parse_result = await api_client.get_user_post_parse_tasks(user_id, status=api_status)
+        post_parse_tasks = post_parse_result.get('tasks', []) if post_parse_result.get('success') else []
+        for t in post_parse_tasks: t['type'] = 'post_parse'
+    
+    if type_filter in ['all', 'post_monitor']:
+        post_monitor_result = await api_client.get_user_post_monitoring_tasks(user_id, status=api_status)
+        post_monitor_tasks = post_monitor_result.get('tasks', []) if post_monitor_result.get('success') else []
+        for t in post_monitor_tasks: t['type'] = 'post_monitor'
+    
+    # Merge all tasks
     tasks = invite_tasks + parse_tasks + post_parse_tasks + post_monitor_tasks
+    
+    # Apply 'completed' filter on bot side (completed, failed, pending)
+    if status_filter == 'completed':
+        tasks = [t for t in tasks if t['status'] in ['completed', 'failed', 'pending']]
+    
+    # Sort by created_at (most recent first)
     tasks.sort(key=lambda x: x.get('created_at', ''), reverse=True)
     
+    # Build filter display text
+    type_names = {
+        'all': 'Все типы',
+        'invite': 'Инвайтинг',
+        'parse': 'Парсинг в файл',
+        'post_parse': 'Парсинг постов',
+        'post_monitor': 'Мониторинг постов'
+    }
+    
+    status_names_filter = {
+        'all': 'Все',
+        'running': 'Активные',
+        'paused': 'Приостановленные',
+        'completed': 'Завершённые'
+    }
+    
+    type_display = type_names.get(type_filter, 'Все типы')
+    status_display = status_names_filter.get(status_filter, 'Все')
+    
     if not tasks:
-        empty_text = "📊 **Статус задач**\n\nУ вас нет активных задач."
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="tasks_back")]])
+        empty_text = f"📊 **Статус задач** · {type_display} · {status_display}\n\nЗадач не найдено."
+        
+        # Add filter buttons even when empty
+        filter_buttons = _build_filter_buttons(status_filter, type_filter)
+        filter_buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="tasks_back")])
+        kb = InlineKeyboardMarkup(filter_buttons)
         
         if edit_message:
             try:
@@ -952,7 +1026,7 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
         return
     
     # Pagination settings
-    tasks_per_page = 20
+    tasks_per_page = 10  # Reduced from 20 to avoid message length issues
     total_pages = (len(tasks) + tasks_per_page - 1) // tasks_per_page
     page = max(0, min(page, total_pages - 1))  # Ensure page is in valid range
     
@@ -960,7 +1034,9 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
     end_idx = start_idx + tasks_per_page
     page_tasks = tasks[start_idx:end_idx]
     
-    text = f"📊 **Статус задач** (Страница {page + 1}/{total_pages})\n\n"
+    # Build header with filters and page info
+    text = f"📊 **Статус задач** · {type_display} · {status_display}\n"
+    text += f"(Страница {page + 1}/{total_pages})\n\n"
     
     status_icons = {
         'pending': '⏳',
@@ -978,50 +1054,59 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
         'failed': 'ошибка'
     }
     
+    # Task type labels
+    type_labels = {
+        'invite': '[Инвайтинг]',
+        'parse': '[Парсинг в файл]',
+        'post_parse': '[Парсинг постов]',
+        'post_monitor': '[Мониторинг постов]'
+    }
+    
     buttons = []
     
     for idx, task in enumerate(page_tasks, start=start_idx + 1):
         icon = status_icons.get(task['status'], '❓')
         status_text = status_names.get(task['status'], task['status'])
         task_type = task.get('type')
+        type_label = type_labels.get(task_type, '[Задача]')
         
         if task_type == 'parse':
             # Parse to file task
             parsed = task.get('parsed_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
-            task_name = f"🔍 {task.get('source_group', 'N/A')[:30]} → 📁 {task.get('file_name', 'N/A')}"
+            task_name = f"{type_label} 🔍 {task.get('source_group', 'N/A')[:25]} → 📁 {task.get('file_name', 'N/A')[:15]}"
             progress_text = f"   Спаршено: {parsed}{limit_text}"
         elif task_type == 'post_parse':
             # Post parsing task
             forwarded = task.get('forwarded_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
-            source = task.get('source_title', 'N/A')[:25]
-            target = task.get('target_title', 'N/A')[:25]
-            task_name = f"📥 {source} → {target}"
+            source = task.get('source_title', 'N/A')[:20]
+            target = task.get('target_title', 'N/A')[:20]
+            task_name = f"{type_label} 📥 {source} → {target}"
             progress_text = f"   Переслано: {forwarded}{limit_text}"
         elif task_type == 'post_monitor':
             # Post monitoring task
             forwarded = task.get('forwarded_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
-            source = task.get('source_title', 'N/A')[:25]
-            target = task.get('target_title', 'N/A')[:25]
-            task_name = f"🔄 {source} → {target}"
+            source = task.get('source_title', 'N/A')[:20]
+            target = task.get('target_title', 'N/A')[:20]
+            task_name = f"{type_label} 🔄 {source} → {target}"
             progress_text = f"   Переслано: {forwarded}{limit_text}"
         else:
             # Invite task
             invited = task.get('invited_count', 0)
             limit = task.get('limit')
             limit_text = f"/{limit}" if limit else ""
-            task_name = f"👥 {task.get('source_group', 'N/A')[:20]} → {task.get('target_group', 'N/A')[:20]}"
+            task_name = f"{type_label} 👥 {task.get('source_group', 'N/A')[:18]} → {task.get('target_group', 'N/A')[:18]}"
             progress_text = f"   Приглашено: {invited}{limit_text}"
         
         rotate_info = ""
         if task.get('rotate_sessions'):
             every = task.get('rotate_every', 0)
-            rotate_info = f" | 🔄 каждые {every}" if every > 0 else " | 🔄 Да"
+            rotate_info = f" | 🔄 каждые {every}" if every > 0 else " | 🔄"
         
         # Numbered task text
         task_text = f"**{idx}.** {icon} {task_name}\n"
@@ -1044,34 +1129,27 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
         if task['status'] == 'running':
             if task_type in ['post_parse', 'post_monitor']:
                 task_buttons.append(InlineKeyboardButton(
-                    f"{idx}. ⏸️ Пауза",
+                    f"{idx}. ⏸️",
                     callback_data=f"{prefix}_pause:{task['id']}"
                 ))
             else:
                 task_buttons.append(InlineKeyboardButton(
-                    f"{idx}. ⏹️ Стоп",
+                    f"{idx}. ⏹️",
                     callback_data=f"{prefix}_stop:{task['id']}"
                 ))
         elif task['status'] == 'paused':
             task_buttons.append(InlineKeyboardButton(
-                f"{idx}. ▶️ Продолжить",
+                f"{idx}. ▶️",
                 callback_data=f"{prefix}_resume:{task['id']}"
             ))
         
-        # Add detail button for non-post tasks
-        if task_type not in ['post_parse', 'post_monitor']:
-            task_buttons.append(InlineKeyboardButton(
-                f"{idx}. 🔍 Детали",
-                callback_data=f"{prefix}_status:{task['id']}"
-            ))
-        else:
-            # For post tasks, refresh shows details
-            task_buttons.append(InlineKeyboardButton(
-                f"{idx}. 🔍 Детали",
-                callback_data=f"{prefix}_refresh:{task['id']}"
-            ))
+        # Add detail button
+        task_buttons.append(InlineKeyboardButton(
+            f"{idx}. 🔍",
+            callback_data=f"{prefix}_refresh:{task['id']}" if task_type in ['post_parse', 'post_monitor'] else f"{prefix}_status:{task['id']}"
+        ))
         
-        # Add delete button for all tasks
+        # Add delete button
         task_buttons.append(InlineKeyboardButton(
             f"{idx}. 🗑️",
             callback_data=f"{prefix}_delete:{task['id']}"
@@ -1079,6 +1157,10 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
         
         if task_buttons:
             buttons.append(task_buttons)
+    
+    # Add filter buttons
+    filter_buttons = _build_filter_buttons(status_filter, type_filter)
+    buttons.extend(filter_buttons)
     
     # Pagination buttons
     nav_buttons = []
@@ -1090,26 +1172,52 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
     if nav_buttons:
         buttons.append(nav_buttons)
     
-    # Count completed/failed/pending tasks
-    clearable_count = sum(1 for t in tasks if t['status'] in ['completed', 'failed', 'pending'])
+    # Get all tasks (without filters) for deletion counts
+    all_tasks_result = await _get_all_tasks(user_id)
+    all_tasks = all_tasks_result['tasks']
+    
+    # Count tasks for deletion buttons
+    completed_count = sum(1 for t in all_tasks if t['status'] in ['completed', 'failed', 'pending'])
+    paused_count = sum(1 for t in all_tasks if t['status'] == 'paused')
     
     # Clear buttons row
     clear_buttons = []
-    if clearable_count > 0:
+    if completed_count > 0:
         clear_buttons.append(InlineKeyboardButton(
-            f"🗑️ Завершённые ({clearable_count})",
+            f"🗑️ Завершённые ({completed_count})",
             callback_data="tasks_clear_completed"
         ))
-    
-    # Always add "Clear all" button if there are tasks
-    if len(tasks) > 0:
+    if paused_count > 0:
         clear_buttons.append(InlineKeyboardButton(
-            f"🗑️ Все ({len(tasks)})",
-            callback_data="tasks_clear_all"
+            f"🗑️ Приостановленные ({paused_count})",
+            callback_data="tasks_clear_paused"
         ))
     
     if clear_buttons:
         buttons.append(clear_buttons)
+    
+    # Add deletion by type if type filter is active (not 'all')
+    if type_filter != 'all':
+        type_count = len(tasks)  # Already filtered by type
+        if type_count > 0:
+            type_names_short = {
+                'invite': 'инвайтинги',
+                'parse': 'парсинг в файл',
+                'post_parse': 'парсинг постов',
+                'post_monitor': 'мониторинг постов'
+            }
+            type_name = type_names_short.get(type_filter, 'задачи')
+            buttons.append([InlineKeyboardButton(
+                f"🗑️ Все {type_name} ({type_count})",
+                callback_data=f"tasks_clear_type:{type_filter}"
+            )])
+    
+    # Always add "Clear all" button if there are tasks
+    if len(all_tasks) > 0:
+        buttons.append([InlineKeyboardButton(
+            f"🗑️ Все ({len(all_tasks)})",
+            callback_data="tasks_clear_all"
+        )])
     
     buttons.append([InlineKeyboardButton("🔄 Обновить", callback_data="tasks_refresh")])
     buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="tasks_back")])
@@ -1126,6 +1234,96 @@ async def show_tasks_status(client: Client, message: Message, page: int = 0, edi
             await message.reply(text, reply_markup=keyboard)
     else:
         await message.reply(text, reply_markup=keyboard)
+
+
+def _build_filter_buttons(status_filter: str, type_filter: str) -> list:
+    """Build filter button rows for task status screen.
+    
+    Args:
+        status_filter: Current status filter
+        type_filter: Current task type filter
+        
+    Returns:
+        List of button rows
+    """
+    buttons = []
+    
+    # Type filter row (compact with icons)
+    type_row = []
+    type_options = [
+        ('all', 'Все', '📋'),
+        ('invite', 'Инвайтинг', '👥'),
+        ('parse', 'Парсинг', '🔍'),
+        ('post_parse', 'Посты', '📥'),
+        ('post_monitor', 'Монитор', '🔄')
+    ]
+    
+    for type_code, type_label, type_icon in type_options:
+        # Mark active filter with ✓
+        label = f"✓ {type_icon}" if type_filter == type_code else type_icon
+        type_row.append(InlineKeyboardButton(
+            label,
+            callback_data=f"tasks_filter_type:{type_code}"
+        ))
+    
+    buttons.append(type_row)
+    
+    # Status filter row
+    status_row = []
+    status_options = [
+        ('all', 'Все'),
+        ('running', 'Активные'),
+        ('paused', 'Пауза'),
+        ('completed', 'Завершённые')
+    ]
+    
+    for status_code, status_label in status_options:
+        # Mark active filter with ✓
+        label = f"✓ {status_label}" if status_filter == status_code else status_label
+        status_row.append(InlineKeyboardButton(
+            label,
+            callback_data=f"tasks_filter_status:{status_code}"
+        ))
+    
+    # Split status row into two rows if too long
+    if len(status_row) > 2:
+        buttons.append(status_row[:2])
+        buttons.append(status_row[2:])
+    else:
+        buttons.append(status_row)
+    
+    return buttons
+
+
+async def _get_all_tasks(user_id: int) -> dict:
+    """Get all tasks for a user without filters.
+    
+    Args:
+        user_id: User ID
+        
+    Returns:
+        Dict with 'tasks' key containing list of all tasks
+    """
+    # Get all task types without status filter
+    invite_result = await api_client.get_user_tasks(user_id)
+    invite_tasks = invite_result.get('tasks', [])
+    for t in invite_tasks: t['type'] = 'invite'
+    
+    parse_result = await api_client.get_user_parse_tasks(user_id)
+    parse_tasks = parse_result.get('tasks', [])
+    for t in parse_tasks: t['type'] = 'parse'
+    
+    post_parse_result = await api_client.get_user_post_parse_tasks(user_id)
+    post_parse_tasks = post_parse_result.get('tasks', []) if post_parse_result.get('success') else []
+    for t in post_parse_tasks: t['type'] = 'post_parse'
+    
+    post_monitor_result = await api_client.get_user_post_monitoring_tasks(user_id)
+    post_monitor_tasks = post_monitor_result.get('tasks', []) if post_monitor_result.get('success') else []
+    for t in post_monitor_tasks: t['type'] = 'post_monitor'
+    
+    tasks = invite_tasks + parse_tasks + post_parse_tasks + post_monitor_tasks
+    
+    return {'tasks': tasks}
 
 
 async def callback_handler(client: Client, callback_query):
@@ -1581,24 +1779,67 @@ async def callback_handler(client: Client, callback_query):
     
     if data.startswith("tasks_page:"):
         page = int(data.split(":")[1])
-        await show_tasks_status(client, callback_query.message, page=page, edit_message=True)
+        await show_tasks_status(client, callback_query.message, page=page, edit_message=True, user_id=user_id)
         await callback_query.answer()
+        return
+    
+    if data.startswith("tasks_filter_status:"):
+        status_filter = data.split(":")[1]
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id, status_filter=status_filter)
+        await callback_query.answer(f"Фильтр по статусу применён")
+        return
+    
+    if data.startswith("tasks_filter_type:"):
+        type_filter = data.split(":")[1]
+        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id, type_filter=type_filter)
+        await callback_query.answer(f"Фильтр по типу применён")
         return
     
     if data == "tasks_clear_completed":
         await handle_clear_completed_tasks(client, callback_query)
         return
     
+    if data == "tasks_clear_paused":
+        await handle_clear_paused_tasks(client, callback_query)
+        return
+    
+    if data.startswith("tasks_clear_type:"):
+        type_filter = data.split(":")[1]
+        await handle_clear_tasks_by_type(client, callback_query, type_filter)
+        return
+    
     if data == "tasks_clear_all":
         await handle_clear_all_tasks(client, callback_query)
         return
     
+    if data == "tasks_clear_all_confirm":
+        await handle_clear_all_tasks_confirm(client, callback_query)
+        return
+    
+    if data.startswith("tasks_clear_type_confirm:"):
+        type_filter = data.split(":")[1]
+        await handle_clear_tasks_by_type_confirm(client, callback_query, type_filter)
+        return
+    
     if data == "tasks_refresh":
-        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id)
+        # Save current page when refreshing
+        current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+        await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)
         await callback_query.answer("Список обновлен")
         return
     
+    if data == "tasks_back_to_list":
+        # Return to task list with saved filters and page
+        current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+        await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)
+        await callback_query.answer()
+        return
+    
     if data == "tasks_back":
+        # Clear filters when going back
+        if user_id in user_states:
+            user_states[user_id].pop('tasks_status_filter', None)
+            user_states[user_id].pop('tasks_type_filter', None)
         user_states[user_id] = {"state": FSM_MAIN_MENU}
         await callback_query.message.reply("Выберите действие:", reply_markup=get_main_keyboard())
         await callback_query.answer()
@@ -2614,8 +2855,9 @@ async def handle_invite_delete(client: Client, callback_query):
     
     if result.get('success'):
         await callback_query.answer("Задача удалена")
-        # Show tasks status again with edit
-        await show_tasks_status(client, callback_query.message, page=0, edit_message=True, user_id=user_id)
+        # Return to saved page
+        current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+        await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)
     else:
         await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
 
@@ -2727,7 +2969,9 @@ async def handle_parse_delete(client: Client, callback_query):
     
     if result.get('success'):
         await callback_query.answer("Задача удалена")
-        await show_tasks_status(client, callback_query.message, edit_message=True, user_id=user_id)
+        # Return to saved page
+        current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+        await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)
     else:
         await callback_query.answer(f"Ошибка: {result.get('error')}", show_alert=True)
 
@@ -5844,3 +6088,241 @@ async def handle_parse_settings_cancel(client: Client, callback_query):
 
     await callback_query.answer("❌ Редактирование отменено")
     await handle_parse_status(client, callback_query, task_id)
+
+
+async def handle_clear_completed_tasks(client: Client, callback_query):
+    """Delete all completed/failed/pending tasks."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Get all tasks
+    all_tasks_result = await _get_all_tasks(user_id)
+    all_tasks = all_tasks_result['tasks']
+    
+    # Filter completed tasks
+    completed_tasks = [t for t in all_tasks if t['status'] in ['completed', 'failed', 'pending']]
+    
+    if not completed_tasks:
+        await callback_query.answer("Нет завершённых задач для удаления", show_alert=True)
+        return
+    
+    # Delete tasks by type
+    deleted_count = 0
+    for task in completed_tasks:
+        task_type = task.get('type')
+        task_id = task['id']
+        
+        try:
+            if task_type == 'invite':
+                result = await api_client.delete_task(task_id)
+            elif task_type == 'parse':
+                result = await api_client.delete_parse_task(task_id)
+            elif task_type == 'post_parse':
+                result = await api_client.delete_post_parse_task(task_id)
+            elif task_type == 'post_monitor':
+                result = await api_client.delete_post_monitoring_task(task_id)
+            else:
+                continue
+            
+            if result.get('success'):
+                deleted_count += 1
+        except Exception as e:
+            logger.error(f"Error deleting task {task_id}: {e}")
+    
+    await callback_query.answer(f"✅ Удалено завершённых задач: {deleted_count}")
+    # Return to saved page
+    current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+    await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)
+
+
+async def handle_clear_paused_tasks(client: Client, callback_query):
+    """Delete all paused tasks."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Get all tasks
+    all_tasks_result = await _get_all_tasks(user_id)
+    all_tasks = all_tasks_result['tasks']
+    
+    # Filter paused tasks
+    paused_tasks = [t for t in all_tasks if t['status'] == 'paused']
+    
+    if not paused_tasks:
+        await callback_query.answer("Нет приостановленных задач для удаления", show_alert=True)
+        return
+    
+    # Delete tasks by type
+    deleted_count = 0
+    for task in paused_tasks:
+        task_type = task.get('type')
+        task_id = task['id']
+        
+        try:
+            if task_type == 'invite':
+                result = await api_client.delete_task(task_id)
+            elif task_type == 'parse':
+                result = await api_client.delete_parse_task(task_id)
+            elif task_type == 'post_parse':
+                result = await api_client.delete_post_parse_task(task_id)
+            elif task_type == 'post_monitor':
+                result = await api_client.delete_post_monitoring_task(task_id)
+            else:
+                continue
+            
+            if result.get('success'):
+                deleted_count += 1
+        except Exception as e:
+            logger.error(f"Error deleting task {task_id}: {e}")
+    
+    await callback_query.answer(f"✅ Удалено приостановленных задач: {deleted_count}")
+    # Return to saved page
+    current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+    await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)
+
+
+async def handle_clear_tasks_by_type(client: Client, callback_query, task_type: str):
+    """Delete all tasks of specific type with confirmation."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Get all tasks
+    all_tasks_result = await _get_all_tasks(user_id)
+    all_tasks = all_tasks_result['tasks']
+    
+    # Filter by type
+    type_tasks = [t for t in all_tasks if t.get('type') == task_type]
+    
+    if not type_tasks:
+        await callback_query.answer("Нет задач этого типа для удаления", show_alert=True)
+        return
+    
+    # Type names for confirmation message
+    type_names = {
+        'invite': 'инвайтинга',
+        'parse': 'парсинга в файл',
+        'post_parse': 'парсинга постов',
+        'post_monitor': 'мониторинга постов'
+    }
+    type_name = type_names.get(task_type, 'этого типа')
+    
+    # Show confirmation
+    confirm_text = f"⚠️ **Подтверждение удаления**\n\n"
+    confirm_text += f"Вы уверены, что хотите удалить **все {len(type_tasks)} задач(и) {type_name}**?\n\n"
+    confirm_text += "Это действие необратимо!"
+    
+    confirm_buttons = [
+        [
+            InlineKeyboardButton("✅ Да, удалить", callback_data=f"tasks_clear_type_confirm:{task_type}"),
+            InlineKeyboardButton("❌ Отмена", callback_data="tasks_refresh")
+        ]
+    ]
+    
+    await callback_query.edit_message_text(
+        confirm_text,
+        reply_markup=InlineKeyboardMarkup(confirm_buttons)
+    )
+    await callback_query.answer()
+
+
+async def handle_clear_tasks_by_type_confirm(client: Client, callback_query, task_type: str):
+    """Actually delete tasks by type after confirmation."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Get all tasks
+    all_tasks_result = await _get_all_tasks(user_id)
+    all_tasks = all_tasks_result['tasks']
+    
+    # Filter by type
+    type_tasks = [t for t in all_tasks if t.get('type') == task_type]
+    
+    # Delete tasks
+    deleted_count = 0
+    for task in type_tasks:
+        task_id = task['id']
+        
+        try:
+            if task_type == 'invite':
+                result = await api_client.delete_task(task_id)
+            elif task_type == 'parse':
+                result = await api_client.delete_parse_task(task_id)
+            elif task_type == 'post_parse':
+                result = await api_client.delete_post_parse_task(task_id)
+            elif task_type == 'post_monitor':
+                result = await api_client.delete_post_monitoring_task(task_id)
+            else:
+                continue
+            
+            if result.get('success'):
+                deleted_count += 1
+        except Exception as e:
+            logger.error(f"Error deleting task {task_id}: {e}")
+    
+    await callback_query.answer(f"✅ Удалено задач: {deleted_count}")
+    # Return to saved page
+    current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+    await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)
+
+
+async def handle_clear_all_tasks(client: Client, callback_query):
+    """Delete all tasks with confirmation."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Get all tasks
+    all_tasks_result = await _get_all_tasks(user_id)
+    all_tasks = all_tasks_result['tasks']
+    
+    if not all_tasks:
+        await callback_query.answer("Нет задач для удаления", show_alert=True)
+        return
+    
+    # Show confirmation
+    confirm_text = f"⚠️ **Подтверждение удаления**\n\n"
+    confirm_text += f"Вы уверены, что хотите удалить **все {len(all_tasks)} задач(и)**?\n\n"
+    confirm_text += "Это действие необратимо!"
+    
+    confirm_buttons = [
+        [
+            InlineKeyboardButton("✅ Да, удалить все", callback_data="tasks_clear_all_confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="tasks_refresh")
+        ]
+    ]
+    
+    await callback_query.edit_message_text(
+        confirm_text,
+        reply_markup=InlineKeyboardMarkup(confirm_buttons)
+    )
+    await callback_query.answer()
+
+
+async def handle_clear_all_tasks_confirm(client: Client, callback_query):
+    """Actually delete all tasks after confirmation."""
+    user_id = int(callback_query.from_user.id)
+    
+    # Get all tasks
+    all_tasks_result = await _get_all_tasks(user_id)
+    all_tasks = all_tasks_result['tasks']
+    
+    # Delete all tasks
+    deleted_count = 0
+    for task in all_tasks:
+        task_type = task.get('type')
+        task_id = task['id']
+        
+        try:
+            if task_type == 'invite':
+                result = await api_client.delete_task(task_id)
+            elif task_type == 'parse':
+                result = await api_client.delete_parse_task(task_id)
+            elif task_type == 'post_parse':
+                result = await api_client.delete_post_parse_task(task_id)
+            elif task_type == 'post_monitor':
+                result = await api_client.delete_post_monitoring_task(task_id)
+            else:
+                continue
+            
+            if result.get('success'):
+                deleted_count += 1
+        except Exception as e:
+            logger.error(f"Error deleting task {task_id}: {e}")
+    
+    await callback_query.answer(f"✅ Удалено задач: {deleted_count}")
+    # Return to saved page (or page 0 if all tasks deleted)
+    current_page = user_states.get(user_id, {}).get('tasks_current_page', 0)
+    await show_tasks_status(client, callback_query.message, page=current_page, edit_message=True, user_id=user_id)

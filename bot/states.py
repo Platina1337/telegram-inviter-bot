@@ -296,7 +296,8 @@ def get_invite_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"invite_pause:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"invite_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"invite_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
@@ -306,7 +307,8 @@ def get_invite_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"invite_resume:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"invite_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"invite_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"invite_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
@@ -316,7 +318,8 @@ def get_parse_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"parse_pause:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"parse_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"parse_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
@@ -326,7 +329,8 @@ def get_parse_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"parse_resume:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"parse_settings_from_status:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"parse_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"parse_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
@@ -1561,7 +1565,8 @@ def get_post_parse_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"pp_pause:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pp_settings:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pp_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pp_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pp_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
@@ -1571,7 +1576,8 @@ def get_post_parse_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"pp_resume:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pp_settings:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pp_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pp_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pp_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
@@ -1581,7 +1587,8 @@ def get_post_monitor_running_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⏸️ Приостановить", callback_data=f"pm_pause:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pm_settings:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pm_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pm_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pm_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
@@ -1591,7 +1598,8 @@ def get_post_monitor_paused_keyboard(task_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("▶️ Продолжить", callback_data=f"pm_resume:{task_id}")],
         [InlineKeyboardButton("⚙️ Изменить настройки", callback_data=f"pm_settings:{task_id}")],
         [InlineKeyboardButton("🗑️ Удалить задачу", callback_data=f"pm_delete:{task_id}")],
-        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pm_refresh:{task_id}")]
+        [InlineKeyboardButton("🔄 Обновить статус", callback_data=f"pm_refresh:{task_id}")],
+        [InlineKeyboardButton("🔙 К списку", callback_data="tasks_back_to_list")]
     ])
 
 
