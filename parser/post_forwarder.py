@@ -1463,6 +1463,29 @@ class PostForwarder:
                 )
                 task = await self.db.get_post_monitoring_task(task_id)
             
+            # Логируем актуальные настройки задачи мониторинга, чтобы видеть,
+            # с какими параметрами (включая add_signature) она действительно запущена.
+            try:
+                logger.info(
+                    f"[POST_FORWARDER] Monitoring task {task_id} settings: "
+                    f"source={task.source_title} ({task.source_id}), "
+                    f"target={task.target_title} ({task.target_id}), "
+                    f"limit={task.limit}, delay={task.delay_seconds}s, "
+                    f"rotate_sessions={task.rotate_sessions}, rotate_every={task.rotate_every}, "
+                    f"use_proxy={task.use_proxy}, "
+                    f"filter_contacts={getattr(task, 'filter_contacts', False)}, "
+                    f"remove_contacts={getattr(task, 'remove_contacts', False)}, "
+                    f"skip_on_contacts={getattr(task, 'skip_on_contacts', False)}, "
+                    f"use_native_forward={getattr(task, 'use_native_forward', False)}, "
+                    f"check_content_if_native={getattr(task, 'check_content_if_native', True)}, "
+                    f"forward_show_source={getattr(task, 'forward_show_source', True)}, "
+                    f"media_filter={getattr(task, 'media_filter', 'all')}, "
+                    f"add_signature={getattr(task, 'add_signature', False)}, "
+                    f"signature_options={getattr(task, 'signature_options', None)}"
+                )
+            except Exception as log_err:
+                logger.debug(f"[POST_FORWARDER] Failed to log monitoring settings for task {task_id}: {log_err}")
+
             await self.db.update_post_monitoring_task(task_id, status='running')
             
             # Session rotation setup
