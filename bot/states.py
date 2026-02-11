@@ -494,16 +494,41 @@ def _format_validation_info(task_data: Dict) -> str:
                     # Примеры:
                     # "No access to source group -100123..."
                     # "No access to source -100123..."
-                    parts = raw.split()
-                    chat_id = parts[-1] if parts else "?"
-                    err_msg = f"Нет доступа к источнику {chat_id}"
+                    # Пытаемся показать человекочитаемое имя источника (title/username), а не сырой ID
+                    source_title = (
+                        task_data.get('source_group_title')
+                        or task_data.get('source_group')
+                        or task_data.get('source_title')
+                        or task_data.get('source_username')
+                    )
+                    if source_title:
+                        display = str(source_title)
+                    else:
+                        # Fallback: вытащить последний токен (обычно это ID)
+                        parts = raw.split()
+                        display = parts[-1] if parts else "?"
+                    # Ограничиваем длину для красоты
+                    if len(display) > 40:
+                        display = display[:37] + "..."
+                    err_msg = f"Нет доступа к источнику {display}"
                 elif "No access to target group" in raw or "No access to target " in raw:
                     # Примеры:
                     # "No access to target group -100123..."
                     # "No access to target -100123..."
-                    parts = raw.split()
-                    chat_id = parts[-1] if parts else "?"
-                    err_msg = f"Нет доступа к цели {chat_id}"
+                    target_title = (
+                        task_data.get('target_group_title')
+                        or task_data.get('target_group')
+                        or task_data.get('target_title')
+                        or task_data.get('target_username')
+                    )
+                    if target_title:
+                        display = str(target_title)
+                    else:
+                        parts = raw.split()
+                        display = parts[-1] if parts else "?"
+                    if len(display) > 40:
+                        display = display[:37] + "..."
+                    err_msg = f"Нет доступа к цели {display}"
                 elif "No access" in raw:
                     # Общий случай, если формат другой
                     err_msg = "Нет доступа"
