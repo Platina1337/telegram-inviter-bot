@@ -41,6 +41,12 @@ class PostForwarder:
         self._stop_flags: Dict[int, bool] = {}  # task_id -> should_stop
         self._last_heartbeat: Dict[int, datetime] = {}  # task_id -> last heartbeat time
         
+        # Enhanced monitoring state tracking
+        self._monitoring_state: Dict[int, Dict[str, Any]] = {}  # task_id -> monitoring state
+        self._watchdog_tasks: Dict[int, asyncio.Task] = {}  # task_id -> watchdog task
+        self._processed_post_keys: Dict[int, set] = {}  # task_id -> set of processed post keys
+        self._processed_message_ids: Dict[int, set] = {}  # task_id -> set of processed message IDs
+        self._last_seen_message_id: Dict[int, int] = {}  # task_id -> last seen message ID
         
         logger.info("[POST_FORWARDER] PostForwarder initialized")
     
@@ -463,6 +469,361 @@ class PostForwarder:
                 return False
                 
         return True
+    
+    def _generate_post_key(self, source_id: int, message: PyrogramMessage) -> str:
+        """Generate unique key for a post (single message or media group)."""
+        if message.media_group_id:
+            return f"mg:{source_id}:{message.media_group_id}"
+        else:
+            return f"msg:{source_id}:{message.id}"
+    
+    def _is_post_processed(self, task_id: int, post_key: str) -> bool:
+        """Check if post was already processed."""
+        if task_id not in self._processed_post_keys:
+            self._processed_post_keys[task_id] = set()
+        return post_key in self._processed_post_keys[task_id]
+    
+    def _mark_post_processed(self, task_id: int, post_key: str, message_ids: List[int]):
+        """Mark post as processed."""
+        if task_id not in self._processed_post_keys:
+            self._processed_post_keys[task_id] = set()
+        if task_id not in self._processed_message_ids:
+            self._processed_message_ids[task_id] = set()
+        
+        self._processed_post_keys[task_id].add(post_key)
+        for msg_id in message_ids:
+            self._processed_message_ids[task_id].add(msg_id)
+    
+    async def _check_monitoring_health(self, task_id: int) -> Dict[str, Any]:
+        """Check if monitoring task is healthy and not stuck."""
+        try:
+            task = await self.db.get_post_monitoring_task(task_id)
+            if not task or task.status != 'running':
+                return {"healthy": False, "reason": "Task not running"}
+            
+            # Check if handler exists and client is connected
+            handler_info = self._monitoring_handlers.get(task_id)
+            if not handler_info:
+                return {"healthy": False, "reason": "No handler registered"}
+            
+            client = handler_info.get("client")
+            if not client or not client.is_connected:
+                return {"healthy": False, "reason": "Client disconnected"}
+            
+            # Check last heartbeat
+            last_hb = self._last_heartbeat.get(task_id)
+            if last_hb:
+                time_since_hb = (datetime.now() - last_hb).total_seconds()
+                if time_since_hb > 120:  # 2 minutes without heartbeat
+                    return {"healthy": False, "reason": f"No heartbeat for {time_since_hb:.0f}s"}
+            
+            # Check for message gap (compare with actual top message)
+            try:
+                last_seen = self._last_seen_message_id.get(task_id, 0)
+                async for message in client.get_chat_history(task.source_id, limit=1):
+                    top_id = message.id
+                    gap = top_id - last_seen if last_seen > 0 else 0
+                    return {
+                        "healthy": True, 
+                        "last_seen": last_seen, 
+                        "top_id": top_id, 
+                        "gap": gap
+                    }
+                return {"healthy": True, "last_seen": last_seen, "top_id": 0, "gap": 0}
+            except Exception as e:
+                return {"healthy": False, "reason": f"Cannot check history: {e}"}
+                
+        except Exception as e:
+            return {"healthy": False, "reason": f"Health check error: {e}"}
+    
+    async def _handle_stuck_monitoring(self, task_id: int, reason: str):
+        """Handle stuck monitoring task - mark as failed and notify user."""
+        logger.error(f"[POST_FORWARDER] Monitoring task {task_id} is stuck: {reason}")
+        
+        error_msg = f"Мониторинг завис: {reason}. Необходимо перезапустить задачу."
+        
+        try:
+            await self.db.update_post_monitoring_task(
+                task_id, 
+                status='failed', 
+                error_message=error_msg
+            )
+            
+            # Get task for user notification
+            task = await self.db.get_post_monitoring_task(task_id)
+            if task:
+                await self._notify_user(
+                    task.user_id,
+                    f"❌ **Задача мониторинга постов зависла**\n\n"
+                    f"📋 Задача: {task.source_title} → {task.target_title}\n"
+                    f"❗ Причина: {reason}\n\n"
+                    f"🔄 Необходимо перезапустить мониторинг."
+                )
+            
+            # Stop the task
+            await self.stop_post_monitoring_task(task_id)
+            
+        except Exception as e:
+            logger.error(f"[POST_FORWARDER] Failed to handle stuck monitoring {task_id}: {e}")
+    
+    async def _monitoring_watchdog(self, task_id: int):
+        """Watchdog for monitoring task - checks health and catches up missed posts."""
+        logger.info(f"[POST_FORWARDER] Starting watchdog for monitoring task {task_id}")
+        
+        try:
+            while not self._stop_flags.get(task_id):
+                try:
+                    # Wait before next check
+                    await asyncio.sleep(30)  # Check every 30 seconds
+                    
+                    if self._stop_flags.get(task_id):
+                        break
+                    
+                    # Check monitoring health
+                    health = await self._check_monitoring_health(task_id)
+                    
+                    if not health.get("healthy", False):
+                        reason = health.get("reason", "Unknown")
+                        await self._handle_stuck_monitoring(task_id, reason)
+                        break
+                    
+                    # Check for message gap and catch up if needed
+                    gap = health.get("gap", 0)
+                    if gap > 0:
+                        logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Detected gap of {gap} messages, catching up...")
+                        await self._catchup_missed_posts(task_id, health.get("last_seen", 0), health.get("top_id", 0))
+                    
+                    # Log watchdog status periodically (every 10 minutes)
+                    if hasattr(self, '_watchdog_log_counter'):
+                        self._watchdog_log_counter[task_id] = self._watchdog_log_counter.get(task_id, 0) + 1
+                    else:
+                        self._watchdog_log_counter = {task_id: 1}
+                    
+                    if self._watchdog_log_counter[task_id] % 20 == 0:  # Every 20 * 30s = 10 minutes
+                        logger.info(
+                            f"[POST_FORWARDER] Watchdog status for task {task_id}: "
+                            f"healthy=True, last_seen={health.get('last_seen', 0)}, "
+                            f"top_id={health.get('top_id', 0)}, gap={gap}"
+                        )
+                    
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"[POST_FORWARDER] Watchdog error for task {task_id}: {e}")
+                    # Continue watching despite errors
+                    await asyncio.sleep(10)
+                    
+        except asyncio.CancelledError:
+            logger.info(f"[POST_FORWARDER] Watchdog for task {task_id} cancelled")
+        except Exception as e:
+            logger.error(f"[POST_FORWARDER] Watchdog for task {task_id} failed: {e}")
+        finally:
+            logger.info(f"[POST_FORWARDER] Watchdog for task {task_id} stopped")
+    
+    async def _catchup_missed_posts(self, task_id: int, last_seen_id: int, top_id: int):
+        """Catch up missed posts in the gap between last_seen_id and top_id."""
+        try:
+            task = await self.db.get_post_monitoring_task(task_id)
+            if not task:
+                return
+            
+            client = await self._get_client(task.session_alias, task.use_proxy)
+            if not client:
+                logger.error(f"[POST_FORWARDER] Cannot get client for catchup in task {task_id}")
+                return
+            
+            logger.info(f"[POST_FORWARDER] Catching up posts for task {task_id}: {last_seen_id} -> {top_id}")
+            
+            # Fetch messages in batches
+            BATCH_SIZE = 50
+            caught_up_count = 0
+            
+            # Get messages newer than last_seen_id
+            messages_to_process = []
+            async for message in client.get_chat_history(task.source_id, limit=BATCH_SIZE * 3):
+                if message.id <= last_seen_id:
+                    break
+                messages_to_process.append(message)
+            
+            # Process in reverse order (oldest first)
+            messages_to_process.reverse()
+            
+            # Group into posts (handle media groups)
+            posts = await self._group_messages_into_posts(messages_to_process)
+            
+            for post_messages in posts:
+                if self._stop_flags.get(task_id):
+                    break
+                
+                # Process through the same pipeline as event handler
+                success = await self._process_post_for_monitoring(task_id, task, client, post_messages, is_catchup=True)
+                if success:
+                    caught_up_count += 1
+                
+                # Update last seen ID
+                max_id = max(msg.id for msg in post_messages)
+                self._last_seen_message_id[task_id] = max(
+                    self._last_seen_message_id.get(task_id, 0), 
+                    max_id
+                )
+            
+            if caught_up_count > 0:
+                logger.info(f"[POST_FORWARDER] Catchup completed for task {task_id}: processed {caught_up_count} posts")
+            
+        except Exception as e:
+            logger.error(f"[POST_FORWARDER] Catchup failed for task {task_id}: {e}")
+    
+    async def _group_messages_into_posts(self, messages: List[PyrogramMessage]) -> List[List[PyrogramMessage]]:
+        """Group messages into posts (single messages and media groups)."""
+        posts = []
+        media_groups = {}
+        
+        for message in messages:
+            if message.media_group_id:
+                # Add to media group
+                group_id = message.media_group_id
+                if group_id not in media_groups:
+                    media_groups[group_id] = []
+                media_groups[group_id].append(message)
+            else:
+                # Single message post
+                posts.append([message])
+        
+        # Add media groups as posts
+        for group_messages in media_groups.values():
+            # Sort by message ID to ensure correct order
+            group_messages.sort(key=lambda m: m.id)
+            posts.append(group_messages)
+        
+        # Sort posts by first message ID
+        posts.sort(key=lambda post: post[0].id)
+        
+        return posts
+    
+    async def _process_post_for_monitoring(
+        self, 
+        task_id: int, 
+        task, 
+        client, 
+        post_messages: List[PyrogramMessage], 
+        is_catchup: bool = False
+    ) -> bool:
+        """
+        Universal post processing function for monitoring (both event and catchup).
+        Returns True if post was successfully forwarded, False otherwise.
+        """
+        try:
+            if not post_messages:
+                return False
+            
+            first_msg = post_messages[0]
+            
+            # Generate post key for deduplication
+            post_key = self._generate_post_key(task.source_id, first_msg)
+            
+            # Check if already processed
+            if self._is_post_processed(task_id, post_key):
+                logger.debug(f"[POST_FORWARDER] Task {task_id}: Post {post_key} already processed, skipping")
+                return False
+            
+            # Apply all the same filters as in current implementation
+            
+            # 1. Skip service messages
+            if any(getattr(msg, 'service', False) for msg in post_messages):
+                logger.info(f"[POST_FORWARDER] Task {task_id}: Skipped post {post_key} (service message)")
+                return False
+            
+            # 2. Content check
+            use_native_forward = getattr(task, 'use_native_forward', False)
+            check_content_if_native = getattr(task, 'check_content_if_native', True)
+            
+            if use_native_forward and check_content_if_native:
+                if not any(self._message_has_content(msg) for msg in post_messages):
+                    logger.info(f"[POST_FORWARDER] Task {task_id}: Skipped post {post_key} (no content, native+check)")
+                    return False
+            elif not use_native_forward:
+                if not any(self._message_has_content(msg) for msg in post_messages):
+                    logger.info(f"[POST_FORWARDER] Task {task_id}: Skipped post {post_key} (no content, copy mode)")
+                    return False
+            
+            # 3. Keyword filtering
+            keywords_whitelist = getattr(task, 'keywords_whitelist', [])
+            keywords_blacklist = getattr(task, 'keywords_blacklist', [])
+            
+            should_check_keywords = True
+            if use_native_forward and not check_content_if_native:
+                should_check_keywords = False
+            
+            if should_check_keywords and (keywords_whitelist or keywords_blacklist):
+                if not self._check_keywords(post_messages, keywords_whitelist, keywords_blacklist):
+                    logger.info(f"[POST_FORWARDER] Task {task_id}: Skipped post {post_key} (keyword filter)")
+                    return False
+            
+            # 4. Media filter (only in copy mode)
+            if not use_native_forward:
+                media_filter = getattr(task, 'media_filter', 'all')
+                if self._should_skip_message(first_msg, media_filter):
+                    logger.info(f"[POST_FORWARDER] Task {task_id}: Skipped post {post_key} (media filter)")
+                    return False
+            
+            # 5. Contact filter
+            skip_on_contacts = getattr(task, 'skip_on_contacts', False)
+            if skip_on_contacts and self._post_has_contacts(post_messages):
+                logger.info(f"[POST_FORWARDER] Task {task_id}: Skipped post {post_key} (contacts detected)")
+                return False
+            
+            # Forward the post
+            if len(post_messages) == 1:
+                # Single message
+                await self._forward_message(
+                    client, first_msg, task.target_id,
+                    getattr(task, 'filter_contacts', False),
+                    getattr(task, 'remove_contacts', False),
+                    getattr(task, 'add_signature', False),
+                    task.source_title,
+                    getattr(task, 'source_username', None),
+                    signature_options=getattr(task, 'signature_options', None)
+                )
+            else:
+                # Media group
+                if use_native_forward:
+                    message_ids = [msg.id for msg in post_messages]
+                    await client.forward_messages(
+                        chat_id=task.target_id,
+                        from_chat_id=task.source_id,
+                        message_ids=message_ids
+                    )
+                else:
+                    await self._forward_media_group(
+                        client, post_messages, task.target_id,
+                        getattr(task, 'filter_contacts', False),
+                        getattr(task, 'remove_contacts', False),
+                        getattr(task, 'add_signature', False),
+                        task.source_title,
+                        getattr(task, 'source_username', None),
+                        signature_options=getattr(task, 'signature_options', None)
+                    )
+            
+            # Mark as processed
+            message_ids = [msg.id for msg in post_messages]
+            self._mark_post_processed(task_id, post_key, message_ids)
+            
+            # Update last seen message ID
+            max_id = max(message_ids)
+            self._last_seen_message_id[task_id] = max(
+                self._last_seen_message_id.get(task_id, 0), 
+                max_id
+            )
+            
+            # Log success
+            source_type = "catchup" if is_catchup else "event"
+            logger.info(f"[POST_FORWARDER] Task {task_id}: Forwarded post {post_key} ({source_type})")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[POST_FORWARDER] Error processing post for task {task_id}: {e}")
+            return False
     
     async def start_post_parse_task(self, task_id: int) -> bool:
         """Start a post parsing task."""
@@ -1474,10 +1835,23 @@ class PostForwarder:
             else:
                 return False
         
+        # Initialize monitoring state
         self._stop_flags[task_id] = False
+        self._processed_post_keys[task_id] = set()
+        self._processed_message_ids[task_id] = set()
+        self._last_seen_message_id[task_id] = 0
+        
+        # Start monitoring task
         self._monitoring_tasks[task_id] = asyncio.create_task(
             self._run_post_monitoring_task(task_id)
         )
+        
+        # Start watchdog task
+        self._watchdog_tasks[task_id] = asyncio.create_task(
+            self._monitoring_watchdog(task_id)
+        )
+        
+        logger.info(f"[POST_FORWARDER] Started monitoring and watchdog for task {task_id}")
         return True
     
     async def stop_post_monitoring_task(self, task_id: int) -> bool:
@@ -1500,6 +1874,7 @@ class PostForwarder:
                     f"[POST_FORWARDER] Failed to remove monitoring handler for task {task_id}: {e}"
                 )
         
+        # Stop monitoring task
         if task_id in self._monitoring_tasks:
             task = self._monitoring_tasks[task_id]
             task.cancel()
@@ -1509,6 +1884,22 @@ class PostForwarder:
                 pass
             # Task may have already removed itself in its finally block
             self._monitoring_tasks.pop(task_id, None)
+        
+        # Stop watchdog task
+        if task_id in self._watchdog_tasks:
+            watchdog_task = self._watchdog_tasks[task_id]
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_tasks.pop(task_id, None)
+        
+        # Clean up state
+        self._processed_post_keys.pop(task_id, None)
+        self._processed_message_ids.pop(task_id, None)
+        self._last_seen_message_id.pop(task_id, None)
+        self._monitoring_state.pop(task_id, None)
         
         await self.db.update_post_monitoring_task(task_id, status='paused')
         return True
@@ -1615,6 +2006,16 @@ class PostForwarder:
                 current_session=session_alias,
                 failed_sessions=failed_sessions
             )
+            
+            # Initialize last seen message ID for watchdog
+            try:
+                async for message in client.get_chat_history(task.source_id, limit=1):
+                    self._last_seen_message_id[task_id] = message.id
+                    logger.info(f"[POST_FORWARDER] Task {task_id}: Initialized last_seen_id to {message.id}")
+                    break
+            except Exception as e:
+                logger.warning(f"[POST_FORWARDER] Task {task_id}: Could not initialize last_seen_id: {e}")
+                self._last_seen_message_id[task_id] = 0
             
             forwarded_count = task.forwarded_count
             posts_since_rotate = 0
@@ -1925,95 +2326,16 @@ class PostForwarder:
                     if media_group_id in media_group_timers:
                         del media_group_timers[media_group_id]
             
-            # Create message handler
+            # Create message handler (simplified version using universal post processing)
             async def new_message_handler(_, message: PyrogramMessage):
                 nonlocal forwarded_count, posts_since_rotate, client, session_alias, current_session_idx
                 
-                # Если задача уже остановлена/отменена, игнорируем любые новые сообщения
+                # Check if task is stopped
                 if self._stop_flags.get(task_id):
-                    logger.info(
-                        f"[POST_FORWARDER] Monitoring task {task_id}: "
-                        f"Received message {getattr(message, 'id', 'unknown')} after stop flag set, skipping"
-                    )
+                    logger.debug(f"[POST_FORWARDER] Task {task_id}: Ignoring message {message.id} (task stopped)")
                     return
                 
-                # Deduplication check
-                if message.id in processed_message_ids:
-                    logger.debug(f"[POST_FORWARDER] Monitoring task {task_id}: Message {message.id} already processed")
-                    return
-                
-                # Skip service messages
-                if getattr(message, 'service', False):
-                    logger.info(
-                        f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                        f"(причина: service_message)"
-                    )
-                    return
-                
-                # Get native forwarding settings
-                use_native_forward = getattr(task, 'use_native_forward', False)
-                check_content_if_native = getattr(task, 'check_content_if_native', True)
-                
-                # Content checking logic
-                if use_native_forward:
-                    # Native forwarding mode: check content only if enabled
-                    if check_content_if_native and not self._message_has_content(message):
-                        logger.info(
-                            f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                            f"(причина: native_forward + check_content_if_native=True, no content)"
-                        )
-                        self._log_message_fields(message, task_id, context="monitoring")
-                        return
-                else:
-                    # Copy mode: always check content
-                    if not self._message_has_content(message):
-                        logger.info(
-                            f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                            f"(причина: copy_mode, service_message_or_empty)"
-                        )
-                        self._log_message_fields(message, task_id, context="monitoring")
-                        return
-                
-                # Apply keyword filtering (both modes)
-                keywords_whitelist = getattr(task, 'keywords_whitelist', [])
-                keywords_blacklist = getattr(task, 'keywords_blacklist', [])
-                
-                should_check_keywords = True
-                if use_native_forward and not check_content_if_native:
-                    should_check_keywords = False
-                
-                if should_check_keywords and (keywords_whitelist or keywords_blacklist):
-                    if not self._check_keywords([message], keywords_whitelist, keywords_blacklist):
-                        logger.info(
-                            f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                            f"(причина: keyword_filter)"
-                        )
-                        return
-
-                # Check media filter (only in copy mode)
-                if not use_native_forward:
-                    media_filter = getattr(task, 'media_filter', 'all')
-                    if self._should_skip_message(message, media_filter):
-                        logger.info(
-                            f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                            f"(причина: media_filter={media_filter})"
-                        )
-                        return
-
-                    # Apply contact filter only in copy mode
-                    # Check for contacts and skip if skip_on_contacts is enabled (only in copy mode)
-                    text = message.text or message.caption or ""
-                    skip_on_contacts = getattr(task, 'skip_on_contacts', False)
-                    
-                    if skip_on_contacts and self._has_contacts(text, self._get_message_entities(message)):
-                        self._log_post_content_preview(task_id, [message])
-                        logger.info(
-                            f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                            f"(причина: skip_on_contacts=True, обнаружены контакты в тексте)"
-                        )
-                        return
-                
-                # Handle media groups
+                # Handle media groups with buffering
                 if message.media_group_id:
                     media_group_id = message.media_group_id
                     
@@ -2026,62 +2348,50 @@ class PostForwarder:
                     if media_group_id in media_group_timers:
                         media_group_timers[media_group_id].cancel()
                     
-                    # Set timer to send group after 3 seconds
-                    async def delayed_send():
+                    # Set timer to process group after 3 seconds
+                    async def process_media_group():
                         await asyncio.sleep(3.0)
-                        await send_buffered_group(media_group_id)
+                        if media_group_id in media_group_buffer:
+                            group_messages = media_group_buffer.pop(media_group_id)
+                            media_group_timers.pop(media_group_id, None)
+                            
+                            # Process media group as single post
+                            success = await self._process_post_for_monitoring(
+                                task_id, task, client, group_messages, is_catchup=False
+                            )
+                            
+                            if success:
+                                nonlocal forwarded_count, posts_since_rotate
+                                forwarded_count += 1
+                                posts_since_rotate += 1
+                                
+                                await self.db.update_post_monitoring_task(
+                                    task_id,
+                                    forwarded_count=forwarded_count,
+                                    last_action_time=datetime.now().isoformat()
+                                )
+                                
+                                # Check limit
+                                if task.limit and forwarded_count >= task.limit:
+                                    logger.info(f"[POST_FORWARDER] Task {task_id}: Limit reached ({forwarded_count})")
+                                    self._stop_flags[task_id] = True
+                                    return
+                                
+                                # Apply delay
+                                if task.delay_seconds > 0:
+                                    await self.db.update_post_monitoring_task(task_id, worker_phase='sleeping')
+                                    await asyncio.sleep(task.delay_seconds)
+                                    await self.db.update_post_monitoring_task(task_id, worker_phase='monitoring')
                     
-                    media_group_timers[media_group_id] = asyncio.create_task(delayed_send())
-                    
-                    logger.debug(
-                        f"[POST_FORWARDER] Monitoring task {task_id}: Buffered message {message.id} "
-                        f"for media group {media_group_id} ({len(media_group_buffer[media_group_id])} items)"
-                    )
+                    media_group_timers[media_group_id] = asyncio.create_task(process_media_group())
                     return
                 
-                # Handle single messages (not part of media group)
-                # Mark as processed
-                processed_message_ids.add(message.id)
+                # Handle single messages
+                success = await self._process_post_for_monitoring(
+                    task_id, task, client, [message], is_catchup=False
+                )
                 
-                try:
-                    # Check if native forwarding is enabled
-                    if use_native_forward:
-                        # Native forwarding: check for skip_on_contacts
-                        skip_on_contacts = getattr(task, 'skip_on_contacts', False)
-                        if skip_on_contacts and self._has_contacts(message.caption or message.text or "", self._get_message_entities(message)):
-                            self._log_post_content_preview(task_id, [message])
-                            logger.info(
-                                f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                                f"(reason: native_forward + skip_on_contacts=True)"
-                            )
-                            return
-
-                        # Native forwarding mode: use forward_messages
-                        forward_show_source = getattr(task, 'forward_show_source', True)
-                        
-                        # Forward message natively
-                        await client.forward_messages(
-                            chat_id=task.target_id,
-                            from_chat_id=task.source_id,
-                            message_ids=[message.id]
-                        )
-                        
-                        logger.debug(
-                            f"[POST_FORWARDER] Monitoring task {task_id}: Native forwarded msg {message.id} "
-                            f"(show_source={forward_show_source})"
-                        )
-                    else:
-                        # Copy mode: use existing copy logic
-                        await self._forward_message(
-                            client, message, task.target_id,
-                            task.filter_contacts, task.remove_contacts,
-                            getattr(task, 'add_signature', False),
-                            task.source_title,
-                            getattr(task, 'source_username', None),
-                            signature_options=getattr(task, 'signature_options', None)
-                        )
-                    
-                    # Increment counter ONLY after successful forward
+                if success:
                     forwarded_count += 1
                     posts_since_rotate += 1
                     
@@ -2091,128 +2401,17 @@ class PostForwarder:
                         last_action_time=datetime.now().isoformat()
                     )
                     
-                    logger.info(
-                        f"[POST_FORWARDER] Monitoring task {task_id}: Forwarded single message "
-                        f"as post #{forwarded_count}"
-                    )
-                    
-                    # Check limit AFTER successful forward
+                    # Check limit
                     if task.limit and forwarded_count >= task.limit:
-                        logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Limit reached ({forwarded_count} posts)")
+                        logger.info(f"[POST_FORWARDER] Task {task_id}: Limit reached ({forwarded_count})")
                         self._stop_flags[task_id] = True
                         return
                     
-                    # Session rotation by posts
-                    if task.rotate_sessions and task.rotate_every > 0 and posts_since_rotate >= task.rotate_every:
-                        logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Rotation triggered (limit {task.rotate_every} posts)")
-                        await self._release_client(session_alias)
-                        
-                        found_new_session = False
-                        start_idx = (current_session_idx + 1) % len(available_sessions)
-                        
-                        for i in range(len(available_sessions)):
-                            idx = (start_idx + i) % len(available_sessions)
-                            candidate_alias = available_sessions[idx]
-                            
-                            if candidate_alias in failed_sessions:
-                                continue
-                                
-                            logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Trying session {candidate_alias} for rotation...")
-                            new_client = await self._get_client(candidate_alias, task.use_proxy)
-                            if new_client:
-                                current_session_idx = idx
-                                session_alias = candidate_alias
-                                client = new_client
-                                posts_since_rotate = 0
-                                found_new_session = True
-                                
-                                await self.db.update_post_monitoring_task(
-                                    task_id,
-                                    current_session=session_alias
-                                    # failed_sessions not updated here typically
-                                )
-                                logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Rotated to session {session_alias}")
-                                break
-                            else:
-                                if candidate_alias not in failed_sessions:
-                                    failed_sessions.append(candidate_alias)
-                        
-                        if not found_new_session:
-                            error_msg = "Не удалось подключить ни одну сессию при ротации (мониторинг)"
-                            await self.db.update_post_monitoring_task(
-                                task_id, status='failed', error_message=error_msg, failed_sessions=failed_sessions
-                            )
-                            await self._notify_user(task.user_id, f"❌ **Задача мониторинга остановлена**\n\n{error_msg}")
-                            self._stop_flags[task_id] = True
-                            return
-                    
+                    # Apply delay
                     if task.delay_seconds > 0:
                         await self.db.update_post_monitoring_task(task_id, worker_phase='sleeping')
                         await asyncio.sleep(task.delay_seconds)
                         await self.db.update_post_monitoring_task(task_id, worker_phase='monitoring')
-                
-                except Exception as e:
-                    err_str = str(e)
-                    if "MEDIA_EMPTY" in err_str:
-                        logger.info(
-                            f"[POST_FORWARDER] Monitoring task {task_id}: Skipped msg {message.id} "
-                            f"(причина: invalid_or_empty_media)"
-                        )
-                    else:
-                        logger.error(f"[POST_FORWARDER] Error in monitoring handler: {e}")
-                        
-                        # Rotate session on error (Robust iteration)
-                        if task.rotate_sessions and len(available_sessions) > 0:
-                            logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Error forwarding ({e}), attempting rotation...")
-                            
-                            if session_alias not in failed_sessions:
-                                failed_sessions.append(session_alias)
-                            
-                            await self._release_client(session_alias)
-                            
-                            found_recovery_session = False
-                            start_idx = (current_session_idx + 1) % len(available_sessions)
-                            
-                            for i in range(len(available_sessions)):
-                                idx = (start_idx + i) % len(available_sessions)
-                                candidate_alias = available_sessions[idx]
-                                
-                                if candidate_alias in failed_sessions:
-                                    continue
-                                
-                                logger.info(f"[POST_FORWARDER] Monitoring task {task_id}: Trying recovery session {candidate_alias}...")
-                                new_client = await self._get_client(candidate_alias, task.use_proxy)
-                                if new_client:
-                                    current_session_idx = idx
-                                    session_alias = candidate_alias
-                                    client = new_client
-                                    found_recovery_session = True
-                                    
-                                    await self.db.update_post_monitoring_task(
-                                        task_id,
-                                        current_session=session_alias,
-                                        failed_sessions=failed_sessions
-                                    )
-                                    logger.info(f"[POST_FORWARDER] Recovered with session {session_alias}")
-                                    break
-                                else:
-                                    if candidate_alias not in failed_sessions:
-                                        failed_sessions.append(candidate_alias)
-                            
-                            if not found_recovery_session:
-                                error_msg = f"Все сессии недоступны или дали ошибку. Посл. ошибка: {e}"
-                                await self.db.update_post_monitoring_task(
-                                    task_id,
-                                    status='failed',
-                                    error_message=error_msg,
-                                    failed_sessions=failed_sessions
-                                )
-                                await self._notify_user(
-                                    task.user_id,
-                                    f"❌ **Задача мониторинга постов остановлена**\n\n{error_msg}"
-                                )
-                                self._stop_flags[task_id] = True
-                                return
             
             # Register handler
             from pyrogram import filters
@@ -2229,7 +2428,33 @@ class PostForwarder:
                 "client": client,
                 "handler": message_handler,
             }
-            
+
+            # Логируем, кем сессия является в источнике и в цели (для диагностики доступа к постам)
+            try:
+                me_source = await client.get_chat_member(task.source_id, "me")
+                status_source = getattr(me_source.status, "name", str(me_source.status))
+                logger.info(
+                    f"[POST_FORWARDER] Monitoring task {task_id}: session {session_alias} in SOURCE "
+                    f"({task.source_title or task.source_id}): status={status_source}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[POST_FORWARDER] Monitoring task {task_id}: session {session_alias} in SOURCE "
+                    f"({task.source_title or task.source_id}): не удалось получить статус — {e}"
+                )
+            try:
+                me_target = await client.get_chat_member(task.target_id, "me")
+                status_target = getattr(me_target.status, "name", str(me_target.status))
+                logger.info(
+                    f"[POST_FORWARDER] Monitoring task {task_id}: session {session_alias} in TARGET "
+                    f"({task.target_title or task.target_id}): status={status_target}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[POST_FORWARDER] Monitoring task {task_id}: session {session_alias} in TARGET "
+                    f"({task.target_title or task.target_id}): не удалось получить статус — {e}"
+                )
+
             logger.info(f"[POST_FORWARDER] Monitoring started for source {task.source_id}")
             
             # Keep running until stopped
