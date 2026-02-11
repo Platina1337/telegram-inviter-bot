@@ -730,8 +730,13 @@ def format_invite_status(task_data: Dict) -> str:
     
     text += _format_validation_info(task_data)
     
-    if task_data.get('error_message'):
-        text += f"\n⚠️ Ошибка: {task_data['error_message']}"
+    error_message = task_data.get('error_message')
+    # Если есть валидные сессии и задача уже не в статусе 'failed',
+    # не показываем старую ошибку "No valid sessions found".
+    if error_message:
+        has_valid_sessions = bool(task_data.get('validated_sessions'))
+        if not (has_valid_sessions and status != 'failed' and "No valid sessions found" in str(error_message)):
+            text += f"\n⚠️ Ошибка: {error_message}"
     
     return text.strip()
 
@@ -934,8 +939,13 @@ def format_parse_status(task_data: Dict) -> str:
     
     text += _format_validation_info(task_data)
     
-    if task_data.get('error_message'):
-        text += f"\n⚠️ Ошибка: {task_data['error_message']}"
+    error_message = task_data.get('error_message')
+    # Аналогично: не показываем "No valid sessions found", если сейчас уже есть валидные сессии
+    # и задача не в статусе 'failed' (идёт/пауза/завершена).
+    if error_message:
+        has_valid_sessions = bool(task_data.get('validated_sessions'))
+        if not (has_valid_sessions and status != 'failed' and "No valid sessions found" in str(error_message)):
+            text += f"\n⚠️ Ошибка: {error_message}"
     
     return text.strip()
 
@@ -1772,8 +1782,13 @@ def format_post_parse_status(task_data: Dict) -> str:
     
     text += _format_validation_info(task_data)
     
-    if task_data.get('error_message'):
-        text += f"\n⚠️ Ошибка: {task_data['error_message']}"
+    error_message = task_data.get('error_message')
+    # Если сейчас есть валидные сессии и задача не в статусе 'failed',
+    # не показываем устаревшую ошибку "No valid sessions found".
+    if error_message:
+        has_valid_sessions = bool(task_data.get('validated_sessions'))
+        if not (has_valid_sessions and status != 'failed' and "No valid sessions found" in str(error_message)):
+            text += f"\n⚠️ Ошибка: {error_message}"
     
     return text.strip()
 
@@ -1892,7 +1907,12 @@ def format_post_monitor_status(task_data: Dict) -> str:
     
     text += _format_validation_info(task_data)
     
-    if task_data.get('error_message'):
-        text += f"\n⚠️ Ошибка: {task_data['error_message']}"
+    error_message = task_data.get('error_message')
+    # Не показываем "No valid sessions found", если уже есть валидные сессии
+    # и задача не в статусе 'failed' (т.е. сейчас она работает).
+    if error_message:
+        has_valid_sessions = bool(task_data.get('validated_sessions'))
+        if not (has_valid_sessions and status != 'failed' and "No valid sessions found" in str(error_message)):
+            text += f"\n⚠️ Ошибка: {error_message}"
     
     return text.strip()
