@@ -61,6 +61,10 @@ class InviterWorker:
                 "validation_errors": validation_errors
             }
 
+        # Если сейчас есть валидные сессии, очищаем старое сообщение об ошибке
+        # (например, "No valid sessions found."), чтобы статус задачи был актуальным.
+        await self.db.update_invite_task(task_id, error_message=None)
+
         # Update task object with new data
         task.validated_sessions = valid_sessions
         task.validation_errors = validation_errors

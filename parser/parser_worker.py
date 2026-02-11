@@ -64,6 +64,10 @@ class ParserWorker:
                 "validation_errors": validation_errors
             }
 
+        # Есть хотя бы одна валидная сессия — очищаем старое сообщение об ошибке
+        # (например, от предыдущего запуска без валидных сессий).
+        await self.db.update_parse_task(task_id, error_message=None)
+
         # Update task object with new data
         task.validated_sessions = valid_sessions
         task.validation_errors = validation_errors

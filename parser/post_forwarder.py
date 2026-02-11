@@ -461,6 +461,10 @@ class PostForwarder:
             await self.db.update_post_parse_task(task_id, status='failed', error_message="No valid sessions found.")
             return False
 
+        # При наличии валидных сессий очищаем старое сообщение об ошибке
+        # (например, "No valid sessions found." от предыдущего запуска).
+        await self.db.update_post_parse_task(task_id, error_message=None)
+
         # Switch session if needed
         if task.available_sessions and task.session_alias not in valid_sessions:
             if valid_sessions:
@@ -1401,6 +1405,10 @@ class PostForwarder:
             logger.error(f"[POST_FORWARDER] Task {task_id} failed validation: No valid sessions. Errors: {validation_errors}")
             await self.db.update_post_monitoring_task(task_id, status='failed', error_message="No valid sessions found.")
             return False
+
+        # При успешной валидации (есть валидные сессии) очищаем старое сообщение об ошибке,
+        # чтобы в статусе не висела устаревшая "No valid sessions found."
+        await self.db.update_post_monitoring_task(task_id, error_message=None)
 
         # Switch session if needed
         if task.available_sessions and task.session_alias not in valid_sessions:
