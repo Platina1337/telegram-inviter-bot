@@ -36,7 +36,8 @@ class PostForwarder:
         self.session_manager = session_manager
         self._parse_tasks: Dict[int, asyncio.Task] = {}  # task_id -> asyncio.Task
         self._monitoring_tasks: Dict[int, asyncio.Task] = {}  # task_id -> asyncio.Task
-        self._monitoring_handlers: Dict[int, Callable] = {}  # task_id -> handler
+        # task_id -> {"client": Client, "callback": Callable}
+        self._monitoring_handlers: Dict[int, Dict[str, Any]] = {}
         self._stop_flags: Dict[int, bool] = {}  # task_id -> should_stop
         self._last_heartbeat: Dict[int, datetime] = {}  # task_id -> last heartbeat time
         
@@ -226,20 +227,53 @@ class PostForwarder:
         if not text:
             return text
         
+        # Debug: логируем исходный текст и флаги фильтрации (обрезаем до 300 символов)
+        try:
+            preview = text if len(text) <= 300 else text[:300] + "…"
+            logger.debug(
+                "[POST_FORWARDER] _filter_contacts: start "
+                f"filter_contacts={filter_contacts}, remove_contacts={remove_contacts}, "
+                f"orig_len={len(text)}, preview={repr(preview)}"
+            )
+        except Exception:
+            # Не ломаем рабочий поток, если вдруг что‑то пошло не так при логировании
+            pass
+
         if filter_contacts or remove_contacts:
-            # Remove @mentions
-            text = re.sub(r'@[\w\d_]+', '', text)
-            
-            # Remove phone numbers
-            text = re.sub(r'\+?\d[\d\s\-\(\)]{7,}\d', '', text)
-            
-            # Remove links
-            text = re.sub(r'https?://\S+', '', text)
-            text = re.sub(r't\.me/\S+', '', text)
-            
-            # Clean up extra whitespace
-            text = re.sub(r'\s+', ' ', text).strip()
-        
+            # Хотим удалить контакты, но сохранить исходное форматирование (переносы строк).
+            # Поэтому обрабатываем текст построчно и чистим только "внутри строк".
+            lines = text.splitlines(keepends=False)
+            cleaned_lines = []
+            for line in lines:
+                # Remove @mentions
+                line = re.sub(r'@[\w\d_]+', '', line)
+                
+                # Remove phone numbers
+                line = re.sub(r'\+?\d[\d\s\-\(\)]{7,}\d', '', line)
+                
+                # Remove links
+                line = re.sub(r'https?://\S+', '', line)
+                line = re.sub(r't\.me/\S+', '', line)
+                
+                # Аккуратно чистим только лишние пробелы в самой строке,
+                # не трогая структуру абзацев.
+                line = re.sub(r'[ \t]{2,}', ' ', line).strip()
+                cleaned_lines.append(line)
+
+            # Собираем обратно, сохраняя исходные переносы
+            text = "\n".join(cleaned_lines)
+
+        # Debug: логируем результат фильтрации
+        try:
+            preview_after = text if len(text) <= 300 else text[:300] + "…"
+            logger.debug(
+                "[POST_FORWARDER] _filter_contacts: end "
+                f"filter_contacts={filter_contacts}, remove_contacts={remove_contacts}, "
+                f"result_len={len(text)}, preview={repr(preview_after)}"
+            )
+        except Exception:
+            pass
+
         return text
 
     def _generate_signature(
@@ -1148,6 +1182,27 @@ class PostForwarder:
         Note: Media groups are handled at the post level, so this function
         just sends individual messages without buffering.
         """
+        task_id = kwargs.get("task_id")
+
+        # Debug: логируем, как именно будет обрабатываться сообщение перед пересылкой
+        try:
+            raw_text = message.text or message.caption or ""
+            preview = raw_text if len(raw_text) <= 300 else raw_text[:300] + "…"
+            entities = self._get_message_entities(message)
+            entities_summary = self._entities_summary(entities)
+            logger.info(
+                f"[POST_FORWARDER] _forward_message: task={task_id}, msg_id={getattr(message, 'id', None)}, "
+                f"filter_contacts={filter_contacts}, remove_contacts={remove_contacts}, "
+                f"add_signature={add_signature}, has_photo={bool(message.photo)}, "
+                f"has_video={bool(message.video)}, has_document={bool(message.document)}, "
+                f"has_audio={bool(message.audio)}, has_voice={bool(message.voice)}, "
+                f"has_animation={bool(message.animation)}, "
+                f"text_len={len(raw_text)}, entities=[{entities_summary}], "
+                f"text_preview={repr(preview)}"
+            )
+        except Exception:
+            # Не прерываем пересылку из‑за проблем с логированием
+            pass
         # Process text
         text = message.text or message.caption or ""
         if filter_contacts or remove_contacts:
@@ -1430,6 +1485,20 @@ class PostForwarder:
         logger.info(f"[POST_FORWARDER] Stopping post monitoring task {task_id}")
         
         self._stop_flags[task_id] = True
+
+        # Try to detach Pyrogram on_message handler for this task (if any)
+        handler_info = self._monitoring_handlers.pop(task_id, None)
+        if handler_info:
+            client = handler_info.get("client")
+            handler = handler_info.get("handler")
+            try:
+                if client and handler:
+                    client.remove_handler(handler)
+                    logger.info(f"[POST_FORWARDER] Removed monitoring handler for task {task_id}")
+            except Exception as e:
+                logger.warning(
+                    f"[POST_FORWARDER] Failed to remove monitoring handler for task {task_id}: {e}"
+                )
         
         if task_id in self._monitoring_tasks:
             task = self._monitoring_tasks[task_id]
@@ -2147,9 +2216,19 @@ class PostForwarder:
             
             # Register handler
             from pyrogram import filters
-            handler = client.on_message(filters.chat(task.source_id) & ~filters.service)
-            handler(new_message_handler)
-            self._monitoring_handlers[task_id] = new_message_handler
+            from pyrogram.handlers import MessageHandler
+
+            # Используем низкоуровневый MessageHandler, чтобы иметь точный объект для remove_handler
+            message_handler = MessageHandler(
+                new_message_handler,
+                filters.chat(task.source_id) & ~filters.service
+            )
+            client.add_handler(message_handler)
+            # Сохраняем и клиента, и сам handler-объект
+            self._monitoring_handlers[task_id] = {
+                "client": client,
+                "handler": message_handler,
+            }
             
             logger.info(f"[POST_FORWARDER] Monitoring started for source {task.source_id}")
             
@@ -2202,8 +2281,19 @@ class PostForwarder:
                 logger.error(f"[POST_FORWARDER] Failed to send monitoring failure notification: {notify_err}")
         finally:
             # Cleanup
-            if task_id in self._monitoring_handlers:
-                del self._monitoring_handlers[task_id]
+            # На всякий случай ещё раз пытаемся снять handler, если задача завершилась сама
+            handler_info = self._monitoring_handlers.pop(task_id, None)
+            if handler_info:
+                h_client = handler_info.get("client")
+                h_handler = handler_info.get("handler")
+                try:
+                    if h_client and h_handler:
+                        h_client.remove_handler(h_handler)
+                        logger.info(f"[POST_FORWARDER] (finally) Removed monitoring handler for task {task_id}")
+                except Exception as e:
+                    logger.warning(
+                        f"[POST_FORWARDER] (finally) Failed to remove monitoring handler for task {task_id}: {e}"
+                    )
             if task_id in self._monitoring_tasks:
                 del self._monitoring_tasks[task_id]
             # Явно помечаем задачу как остановленную, чтобы обработчик сообщений
