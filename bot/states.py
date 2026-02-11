@@ -469,40 +469,61 @@ def _format_validation_info(task_data: Dict) -> str:
     validated_sessions = task_data.get('validated_sessions', [])
     validation_errors = task_data.get('validation_errors')
     text = ""
-    
-    # Error mapping
-    error_map = {
-        "No access": "Нет доступа",
-        "Connection failed": "Ошибка подключения",
-        "Session failed": "Сбой сессии",
-        "PeerIdInvalid": "Нет прав/ID",
-        "Auth key invalid": "Сессия сброшена",
-        "User deactivated": "Аккаунт удален",
-        "FloodWait": "Флуд-лимит",
-        "ChatWriteForbidden": "Запрет писать",
-        "ChatAdminRequired": "Нужны права админа"
-    }
 
     if validation_errors:
         import json
         if isinstance(validation_errors, str):
             try:
                 validation_errors = json.loads(validation_errors)
-            except:
+            except Exception:
+                # Если не удалось распарсить JSON, оставляем как есть
                 pass
-        
+
         if isinstance(validation_errors, dict) and validation_errors:
             text += "\n❌ **Не прошли проверку:**\n"
             limit = 5
             count = 0
             for session, error in validation_errors.items():
-                err_msg = str(error)
-                # Apply mapping
-                for key, value in error_map.items():
-                    if key in err_msg:
-                        err_msg = value
-                        break
-                
+                raw = str(error)
+
+                # Более подробное человеко-понятное сообщение
+                err_msg = raw
+
+                # Детализация по доступу к источнику/цели (invite / parse / post_parse / post_monitoring)
+                if "No access to source group" in raw or "No access to source " in raw:
+                    # Примеры:
+                    # "No access to source group -100123..."
+                    # "No access to source -100123..."
+                    parts = raw.split()
+                    chat_id = parts[-1] if parts else "?"
+                    err_msg = f"Нет доступа к источнику {chat_id}"
+                elif "No access to target group" in raw or "No access to target " in raw:
+                    # Примеры:
+                    # "No access to target group -100123..."
+                    # "No access to target -100123..."
+                    parts = raw.split()
+                    chat_id = parts[-1] if parts else "?"
+                    err_msg = f"Нет доступа к цели {chat_id}"
+                elif "No access" in raw:
+                    # Общий случай, если формат другой
+                    err_msg = "Нет доступа"
+                elif "Connection failed" in raw:
+                    err_msg = "Ошибка подключения"
+                elif "Session failed" in raw:
+                    err_msg = "Сбой сессии"
+                elif "PeerIdInvalid" in raw:
+                    err_msg = "Нет прав / неверный ID"
+                elif "Auth key invalid" in raw:
+                    err_msg = "Сессия сброшена (auth key invalid)"
+                elif "User deactivated" in raw:
+                    err_msg = "Аккаунт удалён"
+                elif "FloodWait" in raw or "flood" in raw.lower():
+                    err_msg = "Флуд-лимит (FloodWait)"
+                elif "ChatWriteForbidden" in raw:
+                    err_msg = "Запрет писать в чат"
+                elif "ChatAdminRequired" in raw:
+                    err_msg = "Нужны права админа"
+
                 text += f"- {session}: {err_msg}\n"
                 count += 1
                 if count >= limit:
