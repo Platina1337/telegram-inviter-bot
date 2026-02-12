@@ -177,7 +177,7 @@ class InviterWorker:
             logger.info(f"Запущена задача инвайтинга по сообщениям {task_id} с умной ротацией")
         elif task.invite_mode == 'from_file':
             self.running_tasks[task_id] = asyncio.create_task(
-                self._run_from_file_invite_task_enhanced(task_id)
+                self._run_from_file_invite_task(task_id)
             )
             logger.info(f"Запущена задача инвайтинга из файла {task_id} с умной ротацией")
         else:
