@@ -190,14 +190,17 @@ class InviteSessionValidator:
             # Test target access with auto-join option
             await self._test_target_access(client, target_group_id, target_username, capabilities, alias, auto_join)
             
-            # Auto-join to SOURCE group so session can see users from file (fix PEER_ID)
+            # Auto-join to SOURCE group, then load members (like group-to-group validator), then re-check file users
             if auto_join_source and source_group_id is not None and source_group_id != -1:
                 joined, join_err = await self.session_manager.join_chat_if_needed(
                     client, source_group_id, source_username
                 )
                 if joined:
-                    logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source group {source_group_id}, re-checking file users access")
+                    logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source group {source_group_id}, loading members and re-checking file users access")
                     await asyncio.sleep(2)
+                    # Загружаем участников группы-источника в peer cache (как в валидаторе группа→группа)
+                    await self._load_source_members_into_cache(client, source_group_id, alias)
+                    await asyncio.sleep(1)
                 elif join_err and "INVITE_REQUEST_SENT" in (join_err or "").upper():
                     logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: запрос на вступление в группу-источник отправлен; после одобрения админом перезапустите валидацию")
                 elif join_err:
@@ -212,6 +215,24 @@ class InviteSessionValidator:
             capabilities.file_users_error = str(e)
         
         return capabilities
+
+    async def _load_source_members_into_cache(self, client, source_group_id: int, alias: str, limit: int = 100) -> None:
+        """
+        Загружает участников группы-источника в peer cache сессии (как в режиме группа→группа).
+        После этого get_users() для этих пользователей не даёт PEER_ID_INVALID.
+        """
+        try:
+            count = 0
+            async for _ in client.get_chat_members(source_group_id, limit=limit):
+                count += 1
+            if count > 0:
+                logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: загружено {count} участников группы-источника в кэш")
+        except Exception as e:
+            err = str(e).lower()
+            if "chat_admin_required" in err:
+                logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: нет прав на список участников (только админ)")
+            else:
+                logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: не удалось загрузить участников источника: {e}")
     
     async def _test_file_users_access(self, client, sample_users: List[Dict[str, Any]], 
                                     capabilities: SessionCapabilities, alias: str):
