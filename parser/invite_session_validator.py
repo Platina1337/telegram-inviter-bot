@@ -21,6 +21,8 @@ class InviteSessionValidator:
     
     def __init__(self, session_manager):
         self.session_manager = session_manager
+        # Simple in-memory cache for validation results
+        self._validation_cache = {}  # {session_alias: {file_hash: (capabilities, timestamp)}}
     
     async def validate_sessions_for_invite_task(self, task: Any) -> Dict[str, Any]:
         """
@@ -168,15 +170,154 @@ class InviteSessionValidator:
         sample, _ = self._get_sample_and_metadata(file_source, sample_size)
         return sample
     
+    def _create_smart_sample(self, file_users: List[Dict[str, Any]], loaded_members: Dict[int, Any], 
+                           sample_size: int = 10) -> tuple:
+        """
+        Создает умную выборку тестовых пользователей из пересечения файла и загруженных участников.
+        
+        Returns:
+            tuple: (sample_users, strategy_used, stats)
+        """
+        import random
+        
+        # Создаем множества ID для быстрого поиска пересечений
+        file_user_ids = set()
+        file_users_dict = {}
+        
+        for user in file_users:
+            user_id = user.get('id')
+            if user_id:
+                file_user_ids.add(user_id)
+                file_users_dict[user_id] = user
+        
+        loaded_member_ids = set(loaded_members.keys())
+        
+        # Находим пересечение
+        intersection_ids = file_user_ids.intersection(loaded_member_ids)
+        
+        stats = {
+            'file_users_total': len(file_users),
+            'file_users_with_id': len(file_user_ids),
+            'loaded_members': len(loaded_members),
+            'intersection_size': len(intersection_ids)
+        }
+        
+        # Стратегия 1: Умная выборка из пересечения (приоритет)
+        if len(intersection_ids) >= sample_size:
+            selected_ids = random.sample(list(intersection_ids), sample_size)
+            sample_users = [file_users_dict[user_id] for user_id in selected_ids]
+            return sample_users, "smart_intersection", stats
+        
+        # Стратегия 2: Частичное пересечение + дополнение из файла
+        elif len(intersection_ids) > 0:
+            # Берем все из пересечения
+            intersection_users = [file_users_dict[user_id] for user_id in intersection_ids]
+            
+            # Дополняем из файла (исключая уже взятых)
+            remaining_file_users = [u for u in file_users 
+                                  if u.get('id') not in intersection_ids and u.get('id')]
+            
+            needed = sample_size - len(intersection_users)
+            if len(remaining_file_users) >= needed:
+                additional_users = random.sample(remaining_file_users, needed)
+            else:
+                additional_users = remaining_file_users
+            
+            sample_users = intersection_users + additional_users
+            return sample_users, "partial_intersection", stats
+        
+        # Стратегия 3: Fallback к обычной выборке из файла
+        else:
+            users_with_id = [u for u in file_users if u.get('id')]
+            if len(users_with_id) >= sample_size:
+                sample_users = random.sample(users_with_id, sample_size)
+            else:
+                sample_users = users_with_id
+            return sample_users, "file_only", stats
+    
+    async def _introduce_session_to_file_users(self, client, file_users: List[Dict[str, Any]], 
+                                             introduction_size: int = 20) -> Dict[str, int]:
+        """
+        Предварительно 'знакомит' сессию с пользователями из файла через get_users.
+        Это добавляет их в peer cache и может улучшить доступность.
+        
+        Returns:
+            Dict[str, int]: Статистика введения {'introduced': count, 'errors': count}
+        """
+        stats = {'introduced': 0, 'errors': 0}
+        
+        # Выбираем случайных пользователей для знакомства
+        import random
+        users_to_introduce = random.sample(file_users, min(introduction_size, len(file_users)))
+        
+        logger.info(f"🔍 [USER_INTRODUCTION] Introducing session to {len(users_to_introduce)} file users...")
+        
+        for user in users_to_introduce:
+            user_id = user.get('id')
+            if not user_id:
+                continue
+                
+            try:
+                # Попытка получить информацию о пользователе (добавляет в кэш)
+                await client.get_users(user_id)
+                stats['introduced'] += 1
+                await asyncio.sleep(0.1)  # Небольшая пауза между запросами
+            except Exception as e:
+                stats['errors'] += 1
+                logger.debug(f"🔍 [USER_INTRODUCTION] Failed to introduce user {user_id}: {e}")
+        
+        logger.info(f"🔍 [USER_INTRODUCTION] Introduction complete: {stats['introduced']} successful, {stats['errors']} errors")
+        return stats
+    
+    def _get_cached_validation(self, alias: str, file_hash: str) -> Optional[SessionCapabilities]:
+        """Get cached validation result if available and not expired."""
+        if not file_hash or alias not in self._validation_cache:
+            return None
+        
+        cache_entry = self._validation_cache[alias].get(file_hash)
+        if not cache_entry:
+            return None
+        
+        capabilities, timestamp = cache_entry
+        
+        # Check if cache is not expired (1 hour)
+        from datetime import datetime, timedelta
+        cache_time = datetime.fromisoformat(timestamp)
+        if datetime.now() - cache_time > timedelta(hours=1):
+            # Remove expired entry
+            del self._validation_cache[alias][file_hash]
+            if not self._validation_cache[alias]:
+                del self._validation_cache[alias]
+            return None
+        
+        logger.info(f"🔍 [CACHE_HIT] Using cached validation for session {alias} (file hash: {file_hash})")
+        return capabilities
+    
+    def _cache_validation_result(self, alias: str, file_hash: str, capabilities: SessionCapabilities):
+        """Cache validation result for future use."""
+        if not file_hash:
+            return
+        
+        if alias not in self._validation_cache:
+            self._validation_cache[alias] = {}
+        
+        timestamp = datetime.now().isoformat()
+        self._validation_cache[alias][file_hash] = (capabilities, timestamp)
+        logger.debug(f"🔍 [CACHE_STORE] Cached validation for session {alias} (file hash: {file_hash})")
+    
     async def _validate_session_for_file_users(
         self, alias: str, target_group_id: int, target_username: str,
         sample_users: List[Dict[str, Any]], use_proxy: bool = True, auto_join: bool = True,
         source_group_id: Optional[int] = None, source_username: Optional[str] = None,
-        auto_join_source: bool = True
+        auto_join_source: bool = True, file_users: Optional[List[Dict[str, Any]]] = None
     ) -> SessionCapabilities:
-        """Validate session capabilities for file-based invites.
-        If source_group_id from file metadata is set, tries to join source group first
-        so the session can 'see' users (fixes PEER_ID_INVALID for file users).
+        """
+        Адаптивная валидация сессии для файлового инвайтинга с несколькими стратегиями.
+        
+        Стратегии валидации:
+        1. Smart sampling - умная выборка из пересечения загруженных участников и файла
+        2. Introduction - предварительное знакомство с пользователями файла
+        3. Standard - обычная валидация
         """
         capabilities = SessionCapabilities(last_validated=datetime.now().isoformat())
         
@@ -190,7 +331,10 @@ class InviteSessionValidator:
             # Test target access with auto-join option
             await self._test_target_access(client, target_group_id, target_username, capabilities, alias, auto_join)
             
-            # Auto-join to SOURCE group, then load members (like group-to-group validator), then re-check file users
+            loaded_members = {}
+            validation_strategy = "standard"
+            
+            # Auto-join to SOURCE group and load members for smart sampling
             if auto_join_source and source_group_id is not None and source_group_id != -1:
                 joined, join_err = await self.session_manager.join_chat_if_needed(
                     client, source_group_id, source_username
@@ -198,16 +342,37 @@ class InviteSessionValidator:
                 if joined:
                     logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source group {source_group_id}, loading members and re-checking file users access")
                     await asyncio.sleep(2)
-                    # Загружаем участников группы-источника в peer cache (как в валидаторе группа→группа)
-                    await self._load_source_members_into_cache(client, source_group_id, alias)
+                    # Загружаем участников группы-источника в peer cache и получаем их для умной выборки
+                    loaded_members = await self._load_source_members_into_cache(client, source_group_id, alias)
+                    capabilities.loaded_source_members = len(loaded_members)
                     await asyncio.sleep(1)
                 elif join_err and "INVITE_REQUEST_SENT" in (join_err or "").upper():
                     logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: запрос на вступление в группу-источник отправлен; после одобрения админом перезапустите валидацию")
                 elif join_err:
                     logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} could not join source: {join_err}")
             
-            # Test file users access (PEER_ID validation)
-            await self._test_file_users_access(client, sample_users, capabilities, alias)
+            # Адаптивная стратегия валидации
+            final_sample = sample_users
+            
+            # Стратегия 1: Smart sampling (если есть загруженные участники и полный список файла)
+            if loaded_members and file_users:
+                smart_sample, strategy, stats = self._create_smart_sample(file_users, loaded_members, sample_size=10)
+                if strategy in ["smart_intersection", "partial_intersection"]:
+                    final_sample = smart_sample
+                    validation_strategy = f"smart_sampling_{strategy}"
+                    logger.info(f"🔍 [SMART_SAMPLING] Session {alias}: Using {strategy} strategy. "
+                              f"Intersection: {stats['intersection_size']}/{stats['file_users_with_id']} users")
+            
+            # Стратегия 2: Introduction (если нет хорошего пересечения)
+            if validation_strategy == "standard" and file_users:
+                # Предварительное знакомство с пользователями файла
+                intro_stats = await self._introduce_session_to_file_users(client, file_users, introduction_size=30)
+                if intro_stats['introduced'] > 0:
+                    validation_strategy = "introduction"
+                    await asyncio.sleep(2)  # Пауза после знакомства
+            
+            # Test file users access with chosen strategy
+            await self._test_file_users_access(client, final_sample, capabilities, alias, validation_strategy)
             
         except Exception as e:
             logger.error(f"Error validating file capabilities for {alias}: {e}")
@@ -216,27 +381,44 @@ class InviteSessionValidator:
         
         return capabilities
 
-    async def _load_source_members_into_cache(self, client, source_group_id: int, alias: str, limit: int = 100) -> None:
+    async def _load_source_members_into_cache(self, client, source_group_id: int, alias: str, limit: int = 1000) -> Dict[int, Any]:
         """
-        Загружает участников группы-источника в peer cache сессии (как в режиме группа→группа).
+        Загружает участников группы-источника в peer cache сессии и возвращает их для умной выборки.
         После этого get_users() для этих пользователей не даёт PEER_ID_INVALID.
+        
+        Returns:
+            Dict[int, Any]: Словарь {user_id: user_info} загруженных участников
         """
+        loaded_members = {}
         try:
             count = 0
-            async for _ in client.get_chat_members(source_group_id, limit=limit):
-                count += 1
+            async for member in client.get_chat_members(source_group_id, limit=limit):
+                if hasattr(member, 'user') and member.user:
+                    user_id = member.user.id
+                    loaded_members[user_id] = {
+                        'id': user_id,
+                        'username': getattr(member.user, 'username', None),
+                        'first_name': getattr(member.user, 'first_name', ''),
+                        'last_name': getattr(member.user, 'last_name', ''),
+                        'is_bot': getattr(member.user, 'is_bot', False)
+                    }
+                    count += 1
+            
             if count > 0:
                 logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: загружено {count} участников группы-источника в кэш")
+            return loaded_members
         except Exception as e:
             err = str(e).lower()
             if "chat_admin_required" in err:
                 logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: нет прав на список участников (только админ)")
             else:
                 logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: не удалось загрузить участников источника: {e}")
+            return {}
     
     async def _test_file_users_access(self, client, sample_users: List[Dict[str, Any]], 
-                                    capabilities: SessionCapabilities, alias: str):
-        """Test if session can access users from file (PEER_ID validation)."""
+                                    capabilities: SessionCapabilities, alias: str, 
+                                    validation_strategy: str = "standard"):
+        """Test if session can access users from file (PEER_ID validation) with detailed metrics."""
         if not sample_users:
             capabilities.file_users_error = "No sample users to test"
             return
@@ -244,10 +426,17 @@ class InviteSessionValidator:
         accessible_count = 0
         total_tested = 0
         peer_errors = 0
+        privacy_errors = 0
+        other_errors = 0
         
-        logger.info(f"🔍 [FILE_VALIDATION] Session {alias} testing access to {len(sample_users)} sample users")
+        capabilities.validation_strategy = validation_strategy
         
-        for user in sample_users[:5]:  # Test only first 5 to avoid rate limits
+        logger.info(f"🔍 [FILE_VALIDATION] Session {alias} testing access to {len(sample_users)} sample users (strategy: {validation_strategy})")
+        
+        # Тестируем до 10 пользователей для более точной статистики
+        test_limit = min(10, len(sample_users))
+        
+        for user in sample_users[:test_limit]:
             user_id = user.get('id')
             username = user.get('username')
             
@@ -273,6 +462,7 @@ class InviteSessionValidator:
                     accessible_count += 1
                     logger.debug(f"🔍 [FILE_VALIDATION] Session {alias} can access user {target}")
                 else:
+                    other_errors += 1
                     logger.debug(f"🔍 [FILE_VALIDATION] Session {alias} cannot resolve user {target}")
                     
             except Exception as e:
@@ -280,25 +470,42 @@ class InviteSessionValidator:
                 if "peer_id_invalid" in error_str:
                     peer_errors += 1
                     logger.debug(f"🔍 [FILE_VALIDATION] Session {alias} PEER_ID_INVALID for user {target}")
+                elif "user_privacy_restricted" in error_str or "privacy" in error_str:
+                    privacy_errors += 1
+                    logger.debug(f"🔍 [FILE_VALIDATION] Session {alias} privacy restricted for user {target}")
                 elif "user_not_found" in error_str:
+                    other_errors += 1
                     logger.debug(f"🔍 [FILE_VALIDATION] Session {alias} user not found: {target}")
                 else:
+                    other_errors += 1
                     logger.debug(f"🔍 [FILE_VALIDATION] Session {alias} error accessing user {target}: {e}")
         
-        # Determine if session can access file users
+        # Сохраняем детальную статистику
+        capabilities.tested_file_users = total_tested
+        capabilities.accessible_file_users = accessible_count
+        capabilities.peer_id_errors = peer_errors
+        capabilities.privacy_errors = privacy_errors
+        capabilities.other_errors = other_errors
+        
+        # Определяем доступность с более гибкими критериями
         if total_tested == 0:
             capabilities.file_users_error = "No valid users to test"
         elif accessible_count == 0:
             if peer_errors == total_tested:
                 capabilities.file_users_error = f"All {peer_errors} tested users have PEER_ID_INVALID (session doesn't know these users)"
+            elif privacy_errors > 0:
+                capabilities.file_users_error = f"All tested users are inaccessible: {peer_errors} PEER_ID, {privacy_errors} privacy, {other_errors} other"
             else:
                 capabilities.file_users_error = f"Cannot access any of {total_tested} tested users"
-        elif accessible_count < total_tested * 0.5:  # Less than 50% accessible
-            capabilities.file_users_error = f"Low accessibility: only {accessible_count}/{total_tested} users accessible (many PEER_ID_INVALID)"
-            capabilities.can_access_file_users = False  # Mark as problematic
         else:
-            capabilities.can_access_file_users = True
-            logger.info(f"🔍 [FILE_VALIDATION] Session {alias} can access {accessible_count}/{total_tested} sample users")
+            # Более мягкий порог: 30% вместо 50% для учета privacy ограничений
+            access_ratio = accessible_count / total_tested
+            if access_ratio >= 0.3:
+                capabilities.can_access_file_users = True
+                logger.info(f"🔍 [FILE_VALIDATION] Session {alias} can access {accessible_count}/{total_tested} sample users ({access_ratio:.1%})")
+            else:
+                capabilities.file_users_error = f"Low accessibility: only {accessible_count}/{total_tested} users accessible ({access_ratio:.1%})"
+                capabilities.can_access_file_users = False
     
     async def _validate_sessions_basic_file_mode(self, task: Any, sessions_to_check: List[str]) -> Dict[str, Any]:
         """Fallback validation when file users can't be loaded - only check target access."""
@@ -386,26 +593,53 @@ class InviteSessionValidator:
     
     def _generate_file_validation_summary(self, session_roles: List[SessionRole], 
                                         inviters: List[str], invalid: Dict[str, str]) -> str:
-        """Generate summary for file-based validation."""
+        """Generate enhanced summary for file-based validation with detailed metrics."""
         total = len(session_roles)
         valid_count = len(inviters)
         invalid_count = len(invalid)
         
-        # Count specific issues
+        # Count specific issues with enhanced categorization
         peer_issues = len([r for r in session_roles 
                           if r.capabilities.file_users_error and 'peer_id_invalid' in r.capabilities.file_users_error.lower()])
+        
+        privacy_issues = len([r for r in session_roles 
+                            if r.capabilities.privacy_errors > 0])
         
         # Count auto-join statistics
         auto_joined = len([r for r in session_roles if getattr(r.capabilities, 'auto_joined_target', False)])
         auto_join_failed = len([r for r in session_roles if getattr(r.capabilities, 'auto_join_error', None)])
         
+        # Count validation strategies used
+        smart_sampling = len([r for r in session_roles 
+                            if r.capabilities.validation_strategy and 'smart_sampling' in r.capabilities.validation_strategy])
+        introduction = len([r for r in session_roles 
+                          if r.capabilities.validation_strategy == 'introduction'])
+        
+        # Calculate average access ratio for valid sessions
+        valid_sessions = [r for r in session_roles if r.role == 'inviter']
+        avg_access_ratio = 0
+        if valid_sessions:
+            total_tested = sum(r.capabilities.tested_file_users for r in valid_sessions)
+            total_accessible = sum(r.capabilities.accessible_file_users for r in valid_sessions)
+            if total_tested > 0:
+                avg_access_ratio = total_accessible / total_tested
+        
         summary_parts = []
         if valid_count > 0:
             summary_parts.append(f"{valid_count} пригодных для инвайтинга")
+            if avg_access_ratio > 0:
+                summary_parts.append(f"(средняя доступность {avg_access_ratio:.1%})")
+        
+        if smart_sampling > 0:
+            summary_parts.append(f"{smart_sampling} умная выборка")
+        if introduction > 0:
+            summary_parts.append(f"{introduction} с предзнакомством")
         if auto_joined > 0:
             summary_parts.append(f"{auto_joined} автоприсоединено")
         if peer_issues > 0:
             summary_parts.append(f"{peer_issues} с проблемами PEER_ID")
+        if privacy_issues > 0:
+            summary_parts.append(f"{privacy_issues} с ограничениями приватности")
         if auto_join_failed > 0:
             summary_parts.append(f"{auto_join_failed} не удалось присоединить")
         if invalid_count > 0:
@@ -738,8 +972,17 @@ class InviteSessionValidator:
                 'validation_summary': 'No sessions available for validation'
             }
         
-        # Load sample users and file metadata (source group for auto-join)
-        sample_users, file_metadata = self._get_sample_and_metadata(task.file_source)
+        # Load full file data for adaptive validation
+        file_data = self._load_file_data(task.file_source)
+        if not file_data:
+            logger.warning(f"🔍 [FILE_VALIDATION] No file data loaded from {task.file_source}")
+            return await self._validate_sessions_basic_file_mode(task, sessions_to_check)
+        
+        file_users = file_data.get('users', [])
+        file_metadata = file_data.get('metadata', {})
+        
+        # Create initial sample for basic validation
+        sample_users, _ = self._get_sample_and_metadata(task.file_source, sample_size=10)
         if not sample_users:
             logger.warning(f"🔍 [FILE_VALIDATION] No sample users loaded from {task.file_source}")
             return await self._validate_sessions_basic_file_mode(task, sessions_to_check)
@@ -747,22 +990,43 @@ class InviteSessionValidator:
         source_group_id = file_metadata.get('source_group_id')
         source_username = file_metadata.get('source_username') or getattr(task, 'source_username', None)
         auto_join_source = getattr(task, 'auto_join_source', True)
+        
+        # Generate file hash for caching (simple hash of user IDs)
+        file_hash = None
+        if file_users:
+            import hashlib
+            user_ids_str = ','.join(str(u.get('id', '')) for u in file_users[:100])  # First 100 users for hash
+            file_hash = hashlib.md5(user_ids_str.encode()).hexdigest()[:8]
+        
         if source_group_id is not None and source_group_id != -1:
             logger.info(f"🔍 [FILE_VALIDATION] Source group from file: {source_group_id}, auto_join_source={auto_join_source}")
         
-        logger.info(f"🔍 [FILE_VALIDATION] Testing {len(sessions_to_check)} sessions with {len(sample_users)} sample users")
+        logger.info(f"🔍 [FILE_VALIDATION] Testing {len(sessions_to_check)} sessions with {len(sample_users)} sample users (file: {len(file_users)} total users)")
         
         for alias in sessions_to_check:
             if not alias:
                 continue
                 
             try:
-                capabilities = await self._validate_session_for_file_users(
-                    alias, task.target_group_id, task.target_username,
-                    sample_users, task.use_proxy, getattr(task, 'auto_join_target', True),
-                    source_group_id=source_group_id, source_username=source_username,
-                    auto_join_source=auto_join_source
-                )
+                # Check cache first
+                cached_capabilities = self._get_cached_validation(alias, file_hash) if file_hash else None
+                
+                if cached_capabilities:
+                    capabilities = cached_capabilities
+                else:
+                    capabilities = await self._validate_session_for_file_users(
+                        alias, task.target_group_id, task.target_username,
+                        sample_users, task.use_proxy, getattr(task, 'auto_join_target', True),
+                        source_group_id=source_group_id, source_username=source_username,
+                        auto_join_source=auto_join_source, file_users=file_users
+                    )
+                    
+                    # Cache the result
+                    if file_hash:
+                        self._cache_validation_result(alias, file_hash, capabilities)
+                
+                # Set file hash for reference
+                capabilities.file_hash = file_hash
                 
                 role = 'inviter' if capabilities.can_invite_to_target and capabilities.can_access_file_users else 'invalid'
                 priority = self._calculate_file_priority(capabilities, alias)
@@ -781,9 +1045,21 @@ class InviteSessionValidator:
                     error_msg = capabilities.target_access_error or capabilities.file_users_error or "Unknown error"
                     invalid_sessions[alias] = error_msg
                 
+                # Enhanced logging with detailed metrics
+                access_ratio = 0
+                if capabilities.tested_file_users > 0:
+                    access_ratio = capabilities.accessible_file_users / capabilities.tested_file_users
+                
                 logger.info(f"🔍 [FILE_VALIDATION] Session {alias}: role={role}, "
                           f"target_invite={capabilities.can_invite_to_target}, "
-                          f"file_users_access={capabilities.can_access_file_users}")
+                          f"file_users_access={capabilities.can_access_file_users} "
+                          f"({capabilities.accessible_file_users}/{capabilities.tested_file_users} = {access_ratio:.1%})")
+                
+                if capabilities.validation_strategy:
+                    logger.debug(f"🔍 [FILE_VALIDATION] Session {alias} strategy: {capabilities.validation_strategy}, "
+                               f"loaded_members: {capabilities.loaded_source_members}, "
+                               f"errors: PEER_ID={capabilities.peer_id_errors}, "
+                               f"privacy={capabilities.privacy_errors}, other={capabilities.other_errors}")
                 
             except Exception as e:
                 logger.error(f"🔍 [FILE_VALIDATION] Error validating session {alias}: {e}")

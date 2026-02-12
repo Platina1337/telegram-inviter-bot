@@ -20,6 +20,16 @@ class SessionCapabilities:
     file_users_error: Optional[str] = None  # Error when accessing file users
     auto_join_error: Optional[str] = None  # Error when attempting auto-join
     last_validated: Optional[str] = None  # ISO timestamp of last validation
+    
+    # Enhanced validation metrics
+    loaded_source_members: int = 0  # Number of source members loaded into cache
+    tested_file_users: int = 0  # Number of file users tested for access
+    accessible_file_users: int = 0  # Number of file users that are accessible
+    peer_id_errors: int = 0  # Number of PEER_ID_INVALID errors encountered
+    privacy_errors: int = 0  # Number of privacy restriction errors
+    other_errors: int = 0  # Number of other errors
+    validation_strategy: Optional[str] = None  # Strategy used for validation (smart_sampling, introduction, etc.)
+    file_hash: Optional[str] = None  # Hash of file content for caching
 
 
 @dataclass
