@@ -460,10 +460,29 @@ async def text_handler(client: Client, message: Message):
             await show_parse_settings(client, message)
             return
         
+        settings = user_states[user_id].get('parse_settings', {})
+        current_keywords = settings.get('keyword_filter', [])
+
         if text.strip() == '0':
             # Clear filter
             user_states[user_id]['parse_settings']['keyword_filter'] = []
             await message.reply("✅ Фильтр по ключевым словам очищен")
+        elif text.strip().startswith('+'):
+            new_words = [k.strip() for k in text[1:].split(',') if k.strip()]
+            added_count = 0
+            for w in new_words:
+                if w not in current_keywords:
+                    current_keywords.append(w)
+                    added_count += 1
+            user_states[user_id]['parse_settings']['keyword_filter'] = current_keywords
+            await message.reply(f"✅ Добавлено {added_count} слов. Всего: {len(current_keywords)}\n`{', '.join(current_keywords)}`")
+        elif text.strip().startswith('-'):
+            rem_words = [k.strip() for k in text[1:].split(',') if k.strip()]
+            original_len = len(current_keywords)
+            current_keywords = [w for w in current_keywords if w not in rem_words]
+            removed_count = original_len - len(current_keywords)
+            user_states[user_id]['parse_settings']['keyword_filter'] = current_keywords
+            await message.reply(f"✅ Удалено {removed_count} слов. Всего: {len(current_keywords)}\n`{', '.join(current_keywords)}`")
         else:
             # Parse keywords from comma-separated input
             keywords = [k.strip() for k in text.split(',') if k.strip()]
@@ -480,10 +499,29 @@ async def text_handler(client: Client, message: Message):
             await show_parse_settings(client, message)
             return
         
+        settings = user_states[user_id].get('parse_settings', {})
+        current_excludes = settings.get('exclude_keywords', [])
+
         if text.strip() == '0':
             # Clear filter
             user_states[user_id]['parse_settings']['exclude_keywords'] = []
             await message.reply("✅ Фильтр слов для исключения очищен")
+        elif text.strip().startswith('+'):
+            new_words = [k.strip() for k in text[1:].split(',') if k.strip()]
+            added_count = 0
+            for w in new_words:
+                if w not in current_excludes:
+                    current_excludes.append(w)
+                    added_count += 1
+            user_states[user_id]['parse_settings']['exclude_keywords'] = current_excludes
+            await message.reply(f"✅ Добавлено {added_count} слов. Всего: {len(current_excludes)}\n`{', '.join(current_excludes)}`")
+        elif text.strip().startswith('-'):
+            rem_words = [k.strip() for k in text[1:].split(',') if k.strip()]
+            original_len = len(current_excludes)
+            current_excludes = [w for w in current_excludes if w not in rem_words]
+            removed_count = original_len - len(current_excludes)
+            user_states[user_id]['parse_settings']['exclude_keywords'] = current_excludes
+            await message.reply(f"✅ Удалено {removed_count} слов. Всего: {len(current_excludes)}\n`{', '.join(current_excludes)}`")
         else:
             # Parse keywords from comma-separated input
             excludes = [k.strip() for k in text.split(',') if k.strip()]
@@ -2319,7 +2357,8 @@ async def callback_handler(client: Client, callback_query):
             f"🔑 **Настройка ключевых слов**\n\n"
             f"Введите ключевые слова через запятую.\n"
             f"Будут спаршены только пользователи, чьи сообщения содержат эти слова.\n\n"
-            f"Пример: `работа, вакансия, заработок`\n\n"
+            f"Пример: `работа, вакансия, заработок`\n"
+            f"Или отправьте `+ слово` чтобы добавить, `- слово` чтобы удалить.\n\n"
             f"Отправьте `0` чтобы очистить фильтр.{current_text}"
         )
         await safe_answer_callback(callback_query)
@@ -2338,7 +2377,8 @@ async def callback_handler(client: Client, callback_query):
             f"🚫 **Настройка слов для исключения**\n\n"
             f"Введите слова через запятую.\n"
             f"Пользователи, написавшие сообщения с этими словами, будут исключены.\n\n"
-            f"Пример: `бот, реклама, спам`\n\n"
+            f"Пример: `бот, реклама, спам`\n"
+            f"Или отправьте `+ слово` чтобы добавить, `- слово` чтобы удалить.\n\n"
             f"Отправьте `0` чтобы очистить фильтр.{current_text}"
         )
         await safe_answer_callback(callback_query)
@@ -4548,24 +4588,36 @@ async def handle_post_forward_callback(client: Client, callback_query):
     
     if data == "pf_settings_whitelist":
         user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST
+        settings = user_states[user_id].get('post_forward_settings', {})
+        current_list = settings.get('keywords_whitelist', [])
+        current_text = f"\n\nТекущие слова:\n`{', '.join(current_list)}`" if current_list else ""
+        
         await callback_query.message.edit_text(
             "✅ **Включая слова (Whitelist)**\n\n"
             "Введите слова через запятую, которые **должны** присутствовать в посте.\n"
             "Если пост не содержит ни одного из этих слов, он будет пропущен.\n\n"
             "Пример: `скидка, акция, распродажа`\n"
-            "Отправьте `нет` или `-` чтобы очистить список."
+            "Или отправьте `+ слово` чтобы добавить, `- слово` чтобы удалить.\n"
+            "Отправьте `нет` или `-` (без слов) чтобы очистить список."
+            f"{current_text}"
         )
         await safe_answer_callback(callback_query)
         return True
 
     if data == "pf_settings_blacklist":
         user_states[user_id]['state'] = FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST
+        settings = user_states[user_id].get('post_forward_settings', {})
+        current_list = settings.get('keywords_blacklist', [])
+        current_text = f"\n\nТекущие слова:\n`{', '.join(current_list)}`" if current_list else ""
+        
         await callback_query.message.edit_text(
             "🚫 **Исключая слова (Blacklist)**\n\n"
             "Введите слова через запятую, которых **не должно** быть в посте.\n"
             "Если пост содержит хотя бы одно из этих слов, он будет пропущен.\n\n"
             "Пример: `реклама, казино, ставки`\n"
-            "Отправьте `нет` или `-` чтобы очистить список."
+            "Или отправьте `+ слово` чтобы добавить, `- слово` чтобы удалить.\n"
+            "Отправьте `нет` или `-` (без слов) чтобы очистить список."
+            f"{current_text}"
         )
         await safe_answer_callback(callback_query)
         return True
@@ -5781,26 +5833,66 @@ async def handle_post_forward_text_input(client: Client, message: Message, text:
         return
 
     if state == FSM_POST_FORWARD_SETTINGS_KEYWORDS_WHITELIST:
-        if text.lower() in ['нет', '-', 'отмена']:
-            user_states[user_id]['post_forward_settings']['keywords_whitelist'] = []
+        settings = user_states[user_id].get('post_forward_settings', {})
+        current_list = settings.get('keywords_whitelist', [])
+        
+        if text.lower() in ['нет', 'отмена'] or (text.strip() == '-' and len(text.strip()) == 1):
+            settings['keywords_whitelist'] = []
             await message.reply("✅ Список обязательных слов очищен")
+        elif text.strip().startswith('+'):
+            new_words = [w.strip() for w in text[1:].split(',') if w.strip()]
+            added_count = 0
+            for w in new_words:
+                if w not in current_list:
+                    current_list.append(w)
+                    added_count += 1
+            settings['keywords_whitelist'] = current_list
+            await message.reply(f"✅ Добавлено {added_count} слов. Всего: {len(current_list)}\n`{', '.join(current_list)}`")
+        elif text.strip().startswith('-'):
+            rem_words = [w.strip() for w in text[1:].split(',') if w.strip()]
+            original_len = len(current_list)
+            current_list = [w for w in current_list if w not in rem_words]
+            removed_count = original_len - len(current_list)
+            settings['keywords_whitelist'] = current_list
+            await message.reply(f"✅ Удалено {removed_count} слов. Всего: {len(current_list)}\n`{', '.join(current_list)}`")
         else:
             words = [w.strip() for w in text.split(',') if w.strip()]
-            user_states[user_id]['post_forward_settings']['keywords_whitelist'] = words
-            await message.reply(f"✅ Установлено {len(words)} обязательных слов")
-        
+            settings['keywords_whitelist'] = words
+            await message.reply(f"✅ Установлено {len(words)} обязательных слов:\n`{', '.join(words)}`")
+            
+        user_states[user_id]['post_forward_settings'] = settings
         await show_post_forward_settings(client, message)
         return
 
     if state == FSM_POST_FORWARD_SETTINGS_KEYWORDS_BLACKLIST:
-        if text.lower() in ['нет', '-', 'отмена']:
-            user_states[user_id]['post_forward_settings']['keywords_blacklist'] = []
+        settings = user_states[user_id].get('post_forward_settings', {})
+        current_list = settings.get('keywords_blacklist', [])
+        
+        if text.lower() in ['нет', 'отмена'] or (text.strip() == '-' and len(text.strip()) == 1):
+            settings['keywords_blacklist'] = []
             await message.reply("✅ Список запрещенных слов очищен")
+        elif text.strip().startswith('+'):
+            new_words = [w.strip() for w in text[1:].split(',') if w.strip()]
+            added_count = 0
+            for w in new_words:
+                if w not in current_list:
+                    current_list.append(w)
+                    added_count += 1
+            settings['keywords_blacklist'] = current_list
+            await message.reply(f"✅ Добавлено {added_count} слов. Всего: {len(current_list)}\n`{', '.join(current_list)}`")
+        elif text.strip().startswith('-'):
+            rem_words = [w.strip() for w in text[1:].split(',') if w.strip()]
+            original_len = len(current_list)
+            current_list = [w for w in current_list if w not in rem_words]
+            removed_count = original_len - len(current_list)
+            settings['keywords_blacklist'] = current_list
+            await message.reply(f"✅ Удалено {removed_count} слов. Всего: {len(current_list)}\n`{', '.join(current_list)}`")
         else:
             words = [w.strip() for w in text.split(',') if w.strip()]
-            user_states[user_id]['post_forward_settings']['keywords_blacklist'] = words
-            await message.reply(f"✅ Установлено {len(words)} запрещенных слов")
-        
+            settings['keywords_blacklist'] = words
+            await message.reply(f"✅ Установлено {len(words)} запрещенных слов:\n`{', '.join(words)}`")
+            
+        user_states[user_id]['post_forward_settings'] = settings
         await show_post_forward_settings(client, message)
         return
 
