@@ -13,8 +13,12 @@ class SessionCapabilities:
     can_fetch_source_members: bool = False  # Can get member list from source group
     can_fetch_source_messages: bool = False  # Can read messages from source group
     can_invite_to_target: bool = False  # Can invite users to target group
+    can_access_file_users: bool = False  # Can access users from file (PEER_ID validation)
+    auto_joined_target: bool = False  # Successfully auto-joined target group
     source_access_error: Optional[str] = None  # Error when accessing source
     target_access_error: Optional[str] = None  # Error when accessing target
+    file_users_error: Optional[str] = None  # Error when accessing file users
+    auto_join_error: Optional[str] = None  # Error when attempting auto-join
     last_validated: Optional[str] = None  # ISO timestamp of last validation
 
 
@@ -79,6 +83,7 @@ class InviteTask:
     rotate_sessions: bool = False
     rotate_every: int = 0  # 0 means disabled/only on error
     use_proxy: bool = False
+    auto_join_target: bool = True  # Автоматически присоединяться к целевой группе
     available_sessions: List[str] = field(default_factory=list)
     failed_sessions: List[str] = field(default_factory=list)  # Сессии с критическими ошибками для этой задачи
     current_offset: int = 0

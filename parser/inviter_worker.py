@@ -81,8 +81,12 @@ class InviterWorker:
                 'can_fetch_members': role.capabilities.can_fetch_source_members,
                 'can_fetch_messages': role.capabilities.can_fetch_source_messages,
                 'can_invite': role.capabilities.can_invite_to_target,
+                'can_access_file_users': getattr(role.capabilities, 'can_access_file_users', False),
+                'auto_joined_target': getattr(role.capabilities, 'auto_joined_target', False),
                 'source_error': role.capabilities.source_access_error,
-                'target_error': role.capabilities.target_access_error
+                'target_error': role.capabilities.target_access_error,
+                'file_users_error': getattr(role.capabilities, 'file_users_error', None),
+                'auto_join_error': getattr(role.capabilities, 'auto_join_error', None)
             } for role in session_roles]
         )
         
@@ -1486,6 +1490,12 @@ class InviterWorker:
             if candidate_alias in task.failed_sessions:
                 logger.debug(f"🔄 SESSION ROTATION: Task {task.id} - Skipping failed session '{candidate_alias}'")
                 continue
+            
+            # Пропускаем сессии с высоким количеством PEER_ID ошибок для файлового режима
+            if (task.invite_mode == 'from_file' and hasattr(task, '_peer_errors_count') and 
+                task._peer_errors_count.get(candidate_alias, 0) >= 10):
+                logger.debug(f"🔄 SESSION ROTATION: Task {task.id} - Skipping session '{candidate_alias}' with {task._peer_errors_count[candidate_alias]} PEER_ID errors")
+                continue
 
             logger.info(f"🔄 SESSION ROTATION: Task {task.id} - Checking candidate session '{candidate_alias}'")
             checked_sessions.append(candidate_alias)
@@ -1585,6 +1595,10 @@ class InviterWorker:
             if not task:
                 logger.error(f"Задача {task_id} не найдена")
                 return
+            
+            # Initialize PEER_ID error tracking
+            if not hasattr(task, '_peer_errors_count'):
+                task._peer_errors_count = {}
             
             if not task.file_source:
                 logger.error(f"Задача {task_id}: file_source не указан")
@@ -1865,12 +1879,46 @@ class InviterWorker:
                         )
                     
                     else:
+                        # Check if this is a PEER_ID_INVALID error that might benefit from rotation
+                        error_msg = result.get('error', '')
+                        if 'PEER_ID_INVALID' in error_msg and task.rotate_sessions and task.available_sessions:
+                            logger.warning(f"Задача {task_id}: PEER_ID_INVALID ошибка для пользователя {user_info} на сессии {task.session_alias}. Попытка ротации...")
+                            
+                            # Track PEER_ID errors for this session
+                            session_peer_errors = getattr(task, '_peer_errors_count', {})
+                            session_peer_errors[task.session_alias] = session_peer_errors.get(task.session_alias, 0) + 1
+                            task._peer_errors_count = session_peer_errors
+                            
+                            # If too many PEER_ID errors (5+), try to rotate
+                            if session_peer_errors[task.session_alias] >= 5:
+                                logger.warning(f"Задача {task_id}: Сессия {task.session_alias} имеет {session_peer_errors[task.session_alias]} PEER_ID_INVALID ошибок. Ротация...")
+                                
+                                # Save current progress
+                                offset_to_save = current_index + max(processed_in_batch - 1, 0)
+                                await self.db.update_invite_task(
+                                    task_id,
+                                    current_offset=offset_to_save
+                                )
+                                current_index = offset_to_save
+                                
+                                new_session = await self._rotate_session(task)
+                                if new_session:
+                                    logger.info(f"Задача {task_id}: Успешно переключено на сессию {new_session} из-за PEER_ID ошибок")
+                                    session_consecutive_invites = 0
+                                    # Reset PEER_ID error count for new session
+                                    session_peer_errors[new_session] = 0
+                                    processed_in_batch = -1  # Signal to break from batch loop
+                                    break
+                                else:
+                                    logger.warning(f"Задача {task_id}: Ротация из-за PEER_ID ошибок не удалась")
+                        
+                        # Record the error
                         await self.db.add_invite_record(
                             task_id, user_id,
                             username=user_username,
                             first_name=user_first_name,
                             status='failed',
-                            error_message=result.get('error')
+                            error_message=error_msg
                         )
                 
                 # Update offset
