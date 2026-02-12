@@ -29,6 +29,19 @@ class InviterWorker:
         self._stop_flags: Dict[int, bool] = {}
         # Track last heartbeat update time to avoid too frequent DB writes
         self._last_heartbeat: Dict[int, float] = {}
+
+    async def _smart_sleep(self, task_id: int, seconds: float):
+        """Sleep for 'seconds' but check for stop flag every 1 second."""
+        for _ in range(int(seconds)):
+            if self._stop_flags.get(task_id, False):
+                return
+            await asyncio.sleep(1)
+        
+        # Sleep remaining fraction
+        remaining = seconds - int(seconds)
+        if remaining > 0 and not self._stop_flags.get(task_id, False):
+            await asyncio.sleep(remaining)
+
     
     async def start_invite_task(self, task_id: int) -> Dict[str, Any]:
         """Start an invite task."""
@@ -619,11 +632,11 @@ class InviterWorker:
                             
                             logger.info(f"Задача {task_id}: Ожидание {actual_delay}с после {task.delay_every} приглашений (базовая задержка: {task.delay_seconds}с)")
                             await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                            await asyncio.sleep(actual_delay)
+                            await self._smart_sleep(task_id, actual_delay)
                         else:
                             # Small fixed delay between invites if no major delay is scheduled
                             await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                            await asyncio.sleep(random.randint(2, 5))
+                            await self._smart_sleep(task_id, random.randint(2, 5))
                     
                     elif result.get('flood_wait'):
                         # FloodWait - pause and maybe rotate session
@@ -640,7 +653,7 @@ class InviterWorker:
                         
                         # Wait out the flood
                         await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                        await asyncio.sleep(min(wait_time, 300))
+                        await self._smart_sleep(task_id, min(wait_time, 300))
                     
                     elif result.get('fatal'):
                         # Fatal error - mark session as failed and try to rotate
@@ -957,11 +970,20 @@ class InviterWorker:
             logger.info(f"Задача {task_id}: Запуск инвайтинга по сообщениям. Уже приглашено: {len(invited_ids)} пользователей (сессия: {task.session_alias}{proxy_str})")
             
             # Join source group if needed
-            await self.session_manager.join_chat_if_needed(
+            joined, error = await self.session_manager.join_chat_if_needed(
                 client, 
                 task.source_group_id, 
                 task.source_username
             )
+            if not joined:
+                error_msg = f"❌ Не удалось вступить в группу-источник: {error}"
+                await self.db.update_invite_task(
+                    task_id,
+                    status='failed',
+                    error_message=error_msg
+                )
+                logger.error(f"Задача {task_id} остановлена: {error_msg}")
+                return
             
             # Notify user that processing started
             await self._notify_user(
@@ -1144,10 +1166,10 @@ class InviterWorker:
                             
                             logger.info(f"Задача {task_id}: Ожидание {actual_delay}с после {task.delay_every} приглашений")
                             await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                            await asyncio.sleep(actual_delay)
+                            await self._smart_sleep(task_id, actual_delay)
                         else:
                             await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                            await asyncio.sleep(random.randint(2, 5))
+                            await self._smart_sleep(task_id, random.randint(2, 5))
                     
                     elif result.get('flood_wait'):
                         # FloodWait - pause and maybe rotate session
@@ -1164,7 +1186,7 @@ class InviterWorker:
                         
                         # Wait out the flood
                         await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                        await asyncio.sleep(min(wait_time, 300))
+                        await self._smart_sleep(task_id, min(wait_time, 300))
                     
                     elif result.get('fatal'):
                         # Fatal error - mark session as failed and try to rotate
@@ -1724,10 +1746,10 @@ class InviterWorker:
                             
                             logger.info(f"Задача {task_id}: Ожидание {actual_delay}с после {task.delay_every} приглашений")
                             await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                            await asyncio.sleep(actual_delay)
+                            await self._smart_sleep(task_id, actual_delay)
                         else:
                             await self.db.update_invite_task(task_id, worker_phase='sleeping')
-                            await asyncio.sleep(random.randint(2, 5))
+                            await self._smart_sleep(task_id, random.randint(2, 5))
                     
                     elif result.get('flood_wait'):
                         wait_time = result['flood_wait']

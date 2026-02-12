@@ -927,40 +927,41 @@ class SessionManager:
                 results[alias] = f"error: {str(e)}"
         return results
 
-    async def join_chat_if_needed(self, client: Client, chat_id: int, username: str = None) -> bool:
+    async def join_chat_if_needed(self, client: Client, chat_id: int, username: str = None) -> (bool, Optional[str]):
         """
         Пытается вступить в чат, если сессия еще не там.
+        Returns: (success, error_message)
         """
         try:
             # Проверяем статус участника
             try:
                 await client.get_chat_member(chat_id, "me")
-                return True # Уже в чате
+                return True, None # Уже в чате
             except UserNotParticipant:
                 # Если не участник, пробуем вступить
                 chat_input = username if username else chat_id
                 logger.info(f"Сессия не в чате {chat_input}, пытаемся вступить...")
                 await client.join_chat(chat_input)
                 logger.info(f"Сессия успешно вступила в чат {chat_input}")
-                return True
+                return True, None
             except Exception as e:
-                if "ChatAdminRequired" in str(e) or "ChannelPrivate" in str(e):
-                    # Для приватных каналов/групп, если мы не там, join_chat может не сработать без ссылки
-                    # Но если мы получили ChatAdminRequired на "me", значит мы там, но нет прав админа? 
-                    # Обычно это ошибка если запрашивать другого, для "me" должно работать.
+                error_str = str(e)
+                if "ChatAdminRequired" in error_str or "ChannelPrivate" in error_str:
                     pass
                 
                 # Пробуем вступить в любом случае если получили ошибку
                 chat_input = username if username else chat_id
                 try:
                     await client.join_chat(chat_input)
-                    return True
+                    return True, None
                 except Exception as e2:
-                    logger.error(f"Не удалось вступить в чат {chat_input}: {e2}")
-                    return False
+                    error_msg = f"Не удалось вступить в чат {chat_input}: {e2}"
+                    logger.error(error_msg)
+                    return False, str(e2)
         except Exception as e:
-            logger.error(f"Ошибка при проверке/вступлении в чат {chat_id}: {e}")
-            return False
+            error_msg = f"Ошибка при проверке/вступлении в чат {chat_id}: {e}"
+            logger.error(error_msg)
+            return False, str(e)
 
     async def validate_session_capability(self, alias: str, source_group_id: int, target_group_id: int, 
                                         source_username: str = None, target_username: str = None, use_proxy: bool = True,
@@ -981,7 +982,9 @@ class SessionManager:
                 return {"success": False, "reason": f"No access to source group {source_group_id} (username: {source_username}): peer not resolved"}
 
             # Пытаемся вступить в источник, чтобы иметь право парсить участников
-            await self.join_chat_if_needed(client, source_group_id, source_username)
+            joined, error = await self.join_chat_if_needed(client, source_group_id, source_username)
+            if not joined:
+                return {"success": False, "reason": f"Не удалось вступить в группу-источник: {error}"}
 
             # ПРОВЕРКА ВИДИМОСТИ УЧАСТНИКОВ
             # Если в группе есть люди, сессия должна их видеть
@@ -1001,7 +1004,9 @@ class SessionManager:
             return {"success": False, "reason": f"No access to target group {target_group_id} (username: {target_username}): peer not resolved"}
 
         # Пытаемся вступить в цель, чтобы иметь право инвайтить
-        await self.join_chat_if_needed(client, target_group_id, target_username)
+        joined, error = await self.join_chat_if_needed(client, target_group_id, target_username)
+        if not joined:
+            return {"success": False, "reason": f"Не удалось вступить в целевую группу: {error}"}
 
         # Additional check for admin rights if possible (basic check)
         # This is not perfect as get_chat might not return member privileges for everyone,
@@ -1124,7 +1129,10 @@ class SessionManager:
                          if not src:
                              invalid[alias] = f"No access to source group {src_id}"
                              continue
-                         await self.join_chat_if_needed(client, src_id, src_user)
+                         joined, error = await self.join_chat_if_needed(client, src_id, src_user)
+                         if not joined:
+                             invalid[alias] = f"Не удалось вступить в группу-источник: {error}"
+                             continue
                     
                     # Target check
                     dst_id = task.target_group_id
@@ -1133,7 +1141,10 @@ class SessionManager:
                     if not dst:
                         invalid[alias] = f"No access to target group {dst_id}"
                         continue
-                    await self.join_chat_if_needed(client, dst_id, dst_user)
+                    joined, error = await self.join_chat_if_needed(client, dst_id, dst_user)
+                    if not joined:
+                        invalid[alias] = f"Не удалось вступить в целевую группу: {error}"
+                        continue
                     
                 elif task_type == 'parse':
                     # Source check
@@ -1143,7 +1154,10 @@ class SessionManager:
                     if not src:
                         invalid[alias] = f"No access to source group {src_id}"
                         continue
-                    await self.join_chat_if_needed(client, src_id, src_user)
+                    joined, error = await self.join_chat_if_needed(client, src_id, src_user)
+                    if not joined:
+                        invalid[alias] = f"Не удалось вступить в группу-источник: {error}"
+                        continue
                     
                     # Check member list visibility for member_list mode
                     if getattr(task, 'parse_mode', 'member_list') == 'member_list':
@@ -1167,7 +1181,10 @@ class SessionManager:
                     if not src:
                         invalid[alias] = f"No access to source {src_id}"
                         continue
-                    await self.join_chat_if_needed(client, src_id, src_user)
+                    joined, error = await self.join_chat_if_needed(client, src_id, src_user)
+                    if not joined:
+                        invalid[alias] = f"Не удалось вступить в источник: {error}"
+                        continue
                     
                     # Target check
                     dst_id = task.target_id
@@ -1176,7 +1193,10 @@ class SessionManager:
                     if not dst:
                         invalid[alias] = f"No access to target {dst_id}"
                         continue
-                    await self.join_chat_if_needed(client, dst_id, dst_user)
+                    joined, error = await self.join_chat_if_needed(client, dst_id, dst_user)
+                    if not joined:
+                        invalid[alias] = f"Не удалось вступить в цель: {error}"
+                        continue
 
                 valid.append(alias)
 

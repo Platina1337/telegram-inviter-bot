@@ -704,11 +704,16 @@ class ParserWorker:
                 logger.info(f"🔄 Задача {task_id} - продолжение с сообщения #{processed_messages}")
             
             # Join source group if needed
-            await self.session_manager.join_chat_if_needed(
+            joined, error = await self.session_manager.join_chat_if_needed(
                 client, 
                 task.source_group_id, 
                 task.source_username
             )
+            if not joined:
+                error_msg = f"❌ Не удалось вступить в группу-источник: {error}"
+                await self.db.update_parse_task(task_id, status='failed', error_message=error_msg)
+                logger.error(f"Задача {task_id} остановлена: {error_msg}")
+                return
             
             # Iterate through chat history
             async for message in client.get_chat_history(task.source_group_id, offset=task.messages_offset):
@@ -1068,11 +1073,16 @@ class ParserWorker:
                 logger.info(f"🔄 Задача {task_id} - продолжение с поста #{processed_posts}")
             
             # Join channel if needed
-            await self.session_manager.join_chat_if_needed(
+            joined, error = await self.session_manager.join_chat_if_needed(
                 client, 
                 task.source_group_id, 
                 task.source_username
             )
+            if not joined:
+                error_msg = f"❌ Не удалось вступить в группу-источник: {error}"
+                await self.db.update_parse_task(task_id, status='failed', error_message=error_msg)
+                logger.error(f"Задача {task_id} остановлена: {error_msg}")
+                return
             
             # Iterate through channel posts
             async for post in client.get_chat_history(task.source_group_id, offset=task.messages_offset):
