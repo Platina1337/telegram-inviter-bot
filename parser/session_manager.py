@@ -852,6 +852,22 @@ class SessionManager:
         try:
             await client.add_chat_members(target_group_id, user_target)
             logger.debug(f"Успешно приглашен пользователь {user_target} в группу {target_group_id} (сессия: {alias}{proxy_str})")
+            # Опциональная проверка: действительно ли пользователь в группе (по факту API может вернуть успех при "приглашение отправлено")
+            if isinstance(user_id, int):
+                await asyncio.sleep(2)
+                try:
+                    member = await client.get_chat_member(target_group_id, user_id)
+                    status = getattr(member.status, "name", str(member.status)).upper()
+                    if status == "LEFT" or status == "KICKED" or status == "BANNED":
+                        logger.warning(
+                            f"После приглашения пользователь {user_id} не в группе (статус: {status}). "
+                            "Возможно, приглашение ожидает принятия или пользователь отклонил."
+                        )
+                except Exception as check_err:
+                    logger.warning(
+                        f"Проверка после приглашения пользователя {user_id} не удалась: {check_err}. "
+                        "Участник может ещё не быть в группе (приглашение на рассмотрении)."
+                    )
             return {"success": True, "user_id": user_id}
         except UserAlreadyParticipant:
             return {"success": True, "user_id": user_id, "already_member": True}
