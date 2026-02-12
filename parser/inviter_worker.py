@@ -31,10 +31,12 @@ class InviterWorker:
         self._last_heartbeat: Dict[int, float] = {}
 
     async def _smart_sleep(self, task_id: int, seconds: float):
-        """Sleep for 'seconds' but check for stop flag every 1 second."""
-        for _ in range(int(seconds)):
+        """Sleep for 'seconds' but check for stop flag every 1 second; update heartbeat so UI does not show 'worker not responding' during delay."""
+        for i in range(int(seconds)):
             if self._stop_flags.get(task_id, False):
                 return
+            if i > 0 and i % 20 == 0:
+                await self._update_heartbeat_if_needed(task_id)
             await asyncio.sleep(1)
         
         # Sleep remaining fraction
@@ -127,10 +129,14 @@ class InviterWorker:
         logger.info(f"🔍 [ENHANCED_VALIDATION] Data fetchers: {data_fetcher_sessions}")
         logger.info(f"🔍 [ENHANCED_VALIDATION] Inviters: {inviter_sessions}")
 
-        # Select initial sessions for different roles
+        # Select initial sessions: on continue use last active session if it's still in the list
         initial_data_fetcher = data_fetcher_sessions[0] if data_fetcher_sessions else None
-        initial_inviter = inviter_sessions[0] if inviter_sessions else None
-        
+        if inviter_sessions:
+            saved_session = (task.current_session or task.session_alias)
+            initial_inviter = saved_session if saved_session and saved_session in inviter_sessions else inviter_sessions[0]
+        else:
+            initial_inviter = None
+
         # Update current session assignments
         await self.db.update_invite_task(
             task_id,
