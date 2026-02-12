@@ -975,10 +975,22 @@ class SessionManager:
                     await client.join_chat(chat_input)
                     return True, None
                 except Exception as e2:
+                    err_str = str(e2).upper()
+                    if "INVITE_REQUEST_SENT" in err_str:
+                        logger.info(
+                            f"Запрос на вступление в чат {chat_input} отправлен; сессия станет участником после одобрения администратором"
+                        )
+                        return False, "INVITE_REQUEST_SENT"
                     error_msg = f"Не удалось вступить в чат {chat_input}: {e2}"
                     logger.error(error_msg)
                     return False, str(e2)
         except Exception as e:
+            err_str = str(e).upper()
+            if "INVITE_REQUEST_SENT" in err_str:
+                logger.info(
+                    f"Запрос на вступление в чат {chat_id} отправлен; сессия станет участником после одобрения администратором"
+                )
+                return False, "INVITE_REQUEST_SENT"
             error_msg = f"Ошибка при проверке/вступлении в чат {chat_id}: {e}"
             logger.error(error_msg)
             return False, str(e)

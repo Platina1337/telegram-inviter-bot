@@ -198,6 +198,8 @@ class InviteSessionValidator:
                 if joined:
                     logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source group {source_group_id}, re-checking file users access")
                     await asyncio.sleep(2)
+                elif join_err and "INVITE_REQUEST_SENT" in (join_err or "").upper():
+                    logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: запрос на вступление в группу-источник отправлен; после одобрения админом перезапустите валидацию")
                 elif join_err:
                     logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} could not join source: {join_err}")
             
