@@ -84,6 +84,7 @@ class InviteTask:
     rotate_every: int = 0  # 0 means disabled/only on error
     use_proxy: bool = False
     auto_join_target: bool = True  # Автоматически присоединяться к целевой группе
+    auto_join_source: bool = True  # При инвайте из файла: присоединяться к группе-источнику, чтобы видеть пользователей (PEER_ID)
     available_sessions: List[str] = field(default_factory=list)
     failed_sessions: List[str] = field(default_factory=list)  # Сессии с критическими ошибками для этой задачи
     current_offset: int = 0

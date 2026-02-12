@@ -129,44 +129,55 @@ class InviteSessionValidator:
             'validation_summary': summary
         }
     
-    async def _load_sample_users_from_file(self, file_source: str, sample_size: int = 10) -> List[Dict[str, Any]]:
-        """Load a sample of users from file for PEER_ID validation."""
+    def _load_file_data(self, file_source: str) -> Optional[Dict[str, Any]]:
+        """Load full file data (users + metadata) for file-based validation."""
         if not file_source:
-            return []
-        
+            return None
         try:
             import sys
             import os
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
             from user_files_manager import UserFilesManager
-            
             manager = UserFilesManager()
-            file_data = manager.load_users_from_file(file_source)
-            users = file_data.get('users', [])
-            
-            if not users:
-                return []
-            
-            # Take a sample for testing - prefer users with user_id
-            users_with_id = [u for u in users if u.get('id')]
-            if len(users_with_id) >= sample_size:
-                import random
-                return random.sample(users_with_id, min(sample_size, len(users_with_id)))
-            else:
-                # If not enough users with ID, take what we have + some with username
-                users_with_username = [u for u in users if u.get('username') and u not in users_with_id]
-                combined = users_with_id + users_with_username[:sample_size - len(users_with_id)]
-                return combined[:sample_size]
-                
+            return manager.load_users_from_file(file_source)
         except Exception as e:
-            logger.error(f"Error loading sample users from {file_source}: {e}")
-            return []
+            logger.error(f"Error loading file {file_source}: {e}")
+            return None
+
+    def _get_sample_and_metadata(self, file_source: str, sample_size: int = 10) -> tuple:
+        """Load file once and return (sample_users, metadata) for file-based validation."""
+        file_data = self._load_file_data(file_source)
+        if not file_data:
+            return [], {}
+        users = file_data.get('users', [])
+        metadata = file_data.get('metadata', {})
+        if not users:
+            return [], metadata
+        users_with_id = [u for u in users if u.get('id')]
+        if len(users_with_id) >= sample_size:
+            import random
+            sample = random.sample(users_with_id, min(sample_size, len(users_with_id)))
+        else:
+            users_with_username = [u for u in users if u.get('username') and u not in users_with_id]
+            combined = users_with_id + users_with_username[:sample_size - len(users_with_id)]
+            sample = combined[:sample_size]
+        return sample, metadata
+
+    async def _load_sample_users_from_file(self, file_source: str, sample_size: int = 10) -> List[Dict[str, Any]]:
+        """Load a sample of users from file for PEER_ID validation."""
+        sample, _ = self._get_sample_and_metadata(file_source, sample_size)
+        return sample
     
     async def _validate_session_for_file_users(
         self, alias: str, target_group_id: int, target_username: str,
-        sample_users: List[Dict[str, Any]], use_proxy: bool = True, auto_join: bool = True
+        sample_users: List[Dict[str, Any]], use_proxy: bool = True, auto_join: bool = True,
+        source_group_id: Optional[int] = None, source_username: Optional[str] = None,
+        auto_join_source: bool = True
     ) -> SessionCapabilities:
-        """Validate session capabilities for file-based invites."""
+        """Validate session capabilities for file-based invites.
+        If source_group_id from file metadata is set, tries to join source group first
+        so the session can 'see' users (fixes PEER_ID_INVALID for file users).
+        """
         capabilities = SessionCapabilities(last_validated=datetime.now().isoformat())
         
         try:
@@ -178,6 +189,17 @@ class InviteSessionValidator:
             
             # Test target access with auto-join option
             await self._test_target_access(client, target_group_id, target_username, capabilities, alias, auto_join)
+            
+            # Auto-join to SOURCE group so session can see users from file (fix PEER_ID)
+            if auto_join_source and source_group_id is not None and source_group_id != -1:
+                joined, join_err = await self.session_manager.join_chat_if_needed(
+                    client, source_group_id, source_username
+                )
+                if joined:
+                    logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source group {source_group_id}, re-checking file users access")
+                    await asyncio.sleep(2)
+                elif join_err:
+                    logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} could not join source: {join_err}")
             
             # Test file users access (PEER_ID validation)
             await self._test_file_users_access(client, sample_users, capabilities, alias)
@@ -693,12 +715,17 @@ class InviteSessionValidator:
                 'validation_summary': 'No sessions available for validation'
             }
         
-        # Load sample users from file to test PEER_ID access
-        sample_users = await self._load_sample_users_from_file(task.file_source)
+        # Load sample users and file metadata (source group for auto-join)
+        sample_users, file_metadata = self._get_sample_and_metadata(task.file_source)
         if not sample_users:
             logger.warning(f"🔍 [FILE_VALIDATION] No sample users loaded from {task.file_source}")
-            # If we can't load users, fall back to basic target validation only
             return await self._validate_sessions_basic_file_mode(task, sessions_to_check)
+        
+        source_group_id = file_metadata.get('source_group_id')
+        source_username = file_metadata.get('source_username') or getattr(task, 'source_username', None)
+        auto_join_source = getattr(task, 'auto_join_source', True)
+        if source_group_id is not None and source_group_id != -1:
+            logger.info(f"🔍 [FILE_VALIDATION] Source group from file: {source_group_id}, auto_join_source={auto_join_source}")
         
         logger.info(f"🔍 [FILE_VALIDATION] Testing {len(sessions_to_check)} sessions with {len(sample_users)} sample users")
         
@@ -709,7 +736,9 @@ class InviteSessionValidator:
             try:
                 capabilities = await self._validate_session_for_file_users(
                     alias, task.target_group_id, task.target_username,
-                    sample_users, task.use_proxy, getattr(task, 'auto_join_target', True)
+                    sample_users, task.use_proxy, getattr(task, 'auto_join_target', True),
+                    source_group_id=source_group_id, source_username=source_username,
+                    auto_join_source=auto_join_source
                 )
                 
                 role = 'inviter' if capabilities.can_invite_to_target and capabilities.can_access_file_users else 'invalid'
