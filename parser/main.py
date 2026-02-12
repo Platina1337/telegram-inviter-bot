@@ -51,6 +51,19 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Запуск сервиса Inviter Parser...")
     
+    # Validate DATABASE_PATH
+    if not config.DATABASE_PATH:
+        logger.error("DATABASE_PATH не указан в .env файле! Укажите путь к базе данных.")
+        sys.exit(1)
+    
+    # Convert relative path to absolute if needed
+    if not os.path.isabs(config.DATABASE_PATH):
+        # Relative path is relative to the inviter directory (parent of parser)
+        inviter_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config.DATABASE_PATH = os.path.join(inviter_dir, config.DATABASE_PATH)
+    
+    logger.info(f"Используется база данных: {config.DATABASE_PATH}")
+    
     # Initialize database
     db = Database(config.DATABASE_PATH)
     await db.connect()

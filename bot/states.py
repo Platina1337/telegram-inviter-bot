@@ -465,7 +465,22 @@ def get_task_assignment_keyboard(session_alias: str) -> InlineKeyboardMarkup:
 
 
 def _format_validation_info(task_data: Dict) -> str:
-    """Format session validation information."""
+    """Format session validation information with enhanced role details."""
+    # Check if this is an enhanced invite task with role information
+    session_roles = task_data.get('session_roles', [])
+    data_fetcher_sessions = task_data.get('data_fetcher_sessions', [])
+    inviter_sessions = task_data.get('inviter_sessions', [])
+    current_data_fetcher = task_data.get('current_data_fetcher')
+    current_inviter = task_data.get('current_inviter')
+    
+    # Use enhanced formatting for invite tasks with role data
+    if session_roles and isinstance(session_roles, list):
+        return _format_enhanced_validation_info(
+            task_data, session_roles, data_fetcher_sessions, 
+            inviter_sessions, current_data_fetcher, current_inviter
+        )
+    
+    # Fallback to original formatting for other tasks
     validated_sessions = task_data.get('validated_sessions', [])
     validation_errors = task_data.get('validation_errors')
     text = ""
@@ -556,6 +571,116 @@ def _format_validation_info(task_data: Dict) -> str:
                     if remaining > 0:
                         text += f" и еще {remaining}...\n"
                     break
+    
+    return text
+
+
+def _format_enhanced_validation_info(task_data: Dict, session_roles: list, 
+                                    data_fetchers: list, inviters: list,
+                                    current_data_fetcher: str, current_inviter: str) -> str:
+    """Format enhanced validation information with role details."""
+    text = "\n🎯 **Роли сессий:**\n"
+    
+    # Current active sessions
+    if current_data_fetcher or current_inviter:
+        text += "📍 **Активные:**\n"
+        if current_data_fetcher:
+            text += f"  📊 Получение данных: `{current_data_fetcher}`\n"
+        if current_inviter:
+            text += f"  📨 Инвайтинг: `{current_inviter}`\n"
+        text += "\n"
+    
+    # Session capabilities summary
+    role_counts = {"both": 0, "data_fetcher": 0, "inviter": 0, "invalid": 0}
+    valid_sessions = []
+    invalid_sessions = {}
+    
+    for role_info in session_roles:
+        if isinstance(role_info, dict):
+            alias = role_info.get('alias', 'unknown')
+            role = role_info.get('role', 'invalid')
+            role_counts[role] = role_counts.get(role, 0) + 1
+            
+            if role != 'invalid':
+                valid_sessions.append(alias)
+            else:
+                # Collect error information
+                source_error = role_info.get('source_error')
+                target_error = role_info.get('target_error')
+                error_msg = source_error or target_error or "Неизвестная ошибка"
+                invalid_sessions[alias] = error_msg
+    
+    # Summary line
+    summary_parts = []
+    if role_counts["both"] > 0:
+        summary_parts.append(f"🔄 {role_counts['both']} универсальных")
+    if role_counts["data_fetcher"] > 0:
+        summary_parts.append(f"📊 {role_counts['data_fetcher']} для данных")
+    if role_counts["inviter"] > 0:
+        summary_parts.append(f"📨 {role_counts['inviter']} для инвайтов")
+    
+    if summary_parts:
+        text += "✅ **Доступно:** " + ", ".join(summary_parts) + "\n"
+    
+    # Detailed session list (limited to avoid spam)
+    if len(valid_sessions) <= 8:  # Show details only for reasonable number of sessions
+        text += "\n📋 **Детали сессий:**\n"
+        for role_info in session_roles:
+            if isinstance(role_info, dict):
+                alias = role_info.get('alias', 'unknown')
+                role = role_info.get('role', 'invalid')
+                
+                if role == 'invalid':
+                    continue
+                
+                # Role icon
+                if role == 'both':
+                    icon = "🔄"
+                elif role == 'data_fetcher':
+                    icon = "📊"
+                elif role == 'inviter':
+                    icon = "📨"
+                else:
+                    icon = "❓"
+                
+                # Capabilities details
+                caps = []
+                if role_info.get('can_fetch_members'):
+                    caps.append("список участников")
+                if role_info.get('can_fetch_messages'):
+                    caps.append("сообщения")
+                if role_info.get('can_invite'):
+                    caps.append("инвайты")
+                
+                caps_text = ", ".join(caps) if caps else "нет возможностей"
+                text += f"  {icon} `{alias}`: {caps_text}\n"
+    
+    # Invalid sessions
+    if invalid_sessions:
+        text += "\n❌ **Не прошли проверку:**\n"
+        count = 0
+        for session, error in invalid_sessions.items():
+            if count >= 5:  # Limit to avoid spam
+                remaining = len(invalid_sessions) - count
+                text += f"  ... и еще {remaining} сессий\n"
+                break
+            
+            # Simplify error message
+            if "Cannot resolve" in error:
+                err_msg = "Не удалось подключиться к группе"
+            elif "Admin rights required" in error:
+                err_msg = "Нужны права администратора"
+            elif "Not a member" in error:
+                err_msg = "Не участник группы"
+            elif "Private channel" in error:
+                err_msg = "Приватный канал"
+            elif "Session not connected" in error:
+                err_msg = "Сессия не подключена"
+            else:
+                err_msg = error[:50] + "..." if len(error) > 50 else error
+            
+            text += f"  • `{session}`: {err_msg}\n"
+            count += 1
     
     return text
 

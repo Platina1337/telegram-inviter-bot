@@ -8,6 +8,26 @@ from datetime import datetime
 
 
 @dataclass
+class SessionCapabilities:
+    """Capabilities of a session for different operations."""
+    can_fetch_source_members: bool = False  # Can get member list from source group
+    can_fetch_source_messages: bool = False  # Can read messages from source group
+    can_invite_to_target: bool = False  # Can invite users to target group
+    source_access_error: Optional[str] = None  # Error when accessing source
+    target_access_error: Optional[str] = None  # Error when accessing target
+    last_validated: Optional[str] = None  # ISO timestamp of last validation
+
+
+@dataclass
+class SessionRole:
+    """Role assignment for a session in a task."""
+    alias: str
+    capabilities: SessionCapabilities
+    role: str  # 'data_fetcher', 'inviter', 'both', 'invalid'
+    priority: int = 0  # Higher priority = preferred for role
+
+
+@dataclass
 class FilterMode:
     """Defines how users are filtered during inviting."""
     mode: Literal["all", "exclude_admins", "exclude_inactive", "exclude_admins_and_inactive"] = "all"
@@ -75,6 +95,13 @@ class InviteTask:
     worker_phase: Optional[str] = None  # Current phase of worker (sleeping, inviting, etc)
     validated_sessions: List[str] = field(default_factory=list)  # Sessions that passed pre-start validation
     validation_errors: Optional[Dict[str, str]] = None  # Validation errors by alias
+    
+    # Enhanced session role management
+    session_roles: List[SessionRole] = field(default_factory=list)  # Detailed role assignments
+    data_fetcher_sessions: List[str] = field(default_factory=list)  # Sessions that can fetch source data
+    inviter_sessions: List[str] = field(default_factory=list)  # Sessions that can invite to target
+    current_data_fetcher: Optional[str] = None  # Currently active data fetcher session
+    current_inviter: Optional[str] = None  # Currently active inviter session
 
 
 

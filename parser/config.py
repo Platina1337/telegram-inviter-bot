@@ -19,8 +19,9 @@ class Config:
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8001"))
     
-    # Database
-    DATABASE_PATH: str = os.getenv("DATABASE_PATH", "inviter.db")
+    # Database (парсер и бот работают с одной БД через API парсера)
+    # DATABASE_PATH обязательно должен быть указан в .env файле
+    DATABASE_PATH: str = os.getenv("DATABASE_PATH", "")
     
     # Sessions
     SESSIONS_DIR: str = os.getenv("SESSIONS_DIR", "sessions")

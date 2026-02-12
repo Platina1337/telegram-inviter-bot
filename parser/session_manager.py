@@ -773,6 +773,10 @@ class SessionManager:
             logger.error(f"Не удалось разрешить peer для группы {group_id} (username: {username}) в сессии {alias}")
             return None
 
+        # Handle None for limit/offset (e.g. from enhanced_invite_methods with limit=None = fetch all)
+        _limit = limit if limit is not None else 10000
+        _offset = offset if offset is not None else 0
+
         members = []
         try:
             # Try to get total members count for logging
@@ -784,11 +788,11 @@ class SessionManager:
             # We iterate and skip manually.
             current_idx = 0
             async for member in client.get_chat_members(group_id):
-                if current_idx < offset:
+                if current_idx < _offset:
                     current_idx += 1
                     continue
 
-                if len(members) >= limit:
+                if len(members) >= _limit:
                     break
 
                 if member.user and not member.user.is_bot:

@@ -51,59 +51,101 @@ class InviterWorker:
         if not task:
             return {"success": False, "error": "Task not found"}
         
-        # Validate sessions first
-        logger.info(f"Validating sessions for task {task_id}...")
-        validation_result = await self.session_manager.validate_sessions_for_task('invite', task)
-        valid_sessions = validation_result['valid']
-        validation_errors = validation_result['invalid']
+        # Enhanced validation with role separation for invite tasks
+        logger.info(f"🔍 [ENHANCED_VALIDATION] Starting role-based validation for task {task_id}...")
         
-        # Update validation results in DB
+        from .invite_session_validator import InviteSessionValidator
+        validator = InviteSessionValidator(self.session_manager)
+        validation_result = await validator.validate_sessions_for_invite_task(task)
+        
+        session_roles = validation_result['session_roles']
+        data_fetcher_sessions = validation_result['data_fetcher_sessions']
+        inviter_sessions = validation_result['inviter_sessions']
+        invalid_sessions = validation_result['invalid_sessions']
+        validation_summary = validation_result['validation_summary']
+        
+        # Update task with enhanced validation results
         await self.db.update_invite_task(
-            task_id, 
-            validated_sessions=valid_sessions,
-            validation_errors=json.dumps(validation_errors) if validation_errors else None
+            task_id,
+            validated_sessions=data_fetcher_sessions + inviter_sessions,  # All capable sessions
+            validation_errors=json.dumps(invalid_sessions) if invalid_sessions else None,
+            # Store role information for status display
+            data_fetcher_sessions=data_fetcher_sessions,
+            inviter_sessions=inviter_sessions,
+            session_roles=[{
+                'alias': role.alias,
+                'role': role.role,
+                'priority': role.priority,
+                'can_fetch_members': role.capabilities.can_fetch_source_members,
+                'can_fetch_messages': role.capabilities.can_fetch_source_messages,
+                'can_invite': role.capabilities.can_invite_to_target,
+                'source_error': role.capabilities.source_access_error,
+                'target_error': role.capabilities.target_access_error
+            } for role in session_roles]
         )
         
-        if not valid_sessions:
-            logger.error(f"Task {task_id} failed validation: No valid sessions. Errors: {validation_errors}")
-            # Ensure we mark it as failed so user sees it
-            await self.db.update_invite_task(task_id, status='failed', error_message="No valid sessions found during pre-check.")
+        # Check if we have any capable sessions
+        if not data_fetcher_sessions and not inviter_sessions:
+            logger.error(f"Task {task_id} failed validation: No capable sessions. Summary: {validation_summary}")
+            await self.db.update_invite_task(
+                task_id, 
+                status='failed', 
+                error_message=f"No capable sessions found: {validation_summary}"
+            )
             return {
-                "success": False, 
-                "error": "No valid sessions found. Check validation errors.", 
-                "validation_errors": validation_errors
+                "success": False,
+                "error": "No capable sessions found",
+                "validation_summary": validation_summary,
+                "invalid_sessions": invalid_sessions
             }
-
-        # Если сейчас есть валидные сессии, очищаем старое сообщение об ошибке
-        # (например, "No valid sessions found."), чтобы статус задачи был актуальным.
+        
+        # Special case: no data fetchers but have inviters (file mode only)
+        if not data_fetcher_sessions and inviter_sessions and task.invite_mode != 'from_file':
+            logger.error(f"Task {task_id}: No sessions can fetch source data, but mode is {task.invite_mode}")
+            await self.db.update_invite_task(
+                task_id,
+                status='failed',
+                error_message=f"No sessions can access source data for {task.invite_mode} mode"
+            )
+            return {
+                "success": False,
+                "error": f"No sessions can access source data for {task.invite_mode} mode",
+                "validation_summary": validation_summary
+            }
+        
+        # Clear any previous error messages
         await self.db.update_invite_task(task_id, error_message=None)
+        
+        # Update task object with enhanced validation data
+        task.validated_sessions = data_fetcher_sessions + inviter_sessions
+        task.validation_errors = invalid_sessions
+        task.session_roles = session_roles
+        task.data_fetcher_sessions = data_fetcher_sessions
+        task.inviter_sessions = inviter_sessions
+        
+        logger.info(f"🔍 [ENHANCED_VALIDATION] Task {task_id} validation complete: {validation_summary}")
+        logger.info(f"🔍 [ENHANCED_VALIDATION] Data fetchers: {data_fetcher_sessions}")
+        logger.info(f"🔍 [ENHANCED_VALIDATION] Inviters: {inviter_sessions}")
 
-        # Update task object with new data
-        task.validated_sessions = valid_sessions
-        task.validation_errors = validation_errors
-
-        # If current session is not valid, switch to first valid
-        if task.available_sessions and task.session_alias not in valid_sessions:
-            if valid_sessions:
-                new_session = valid_sessions[0]
-                logger.info(f"Switching task {task_id} to valid session: {new_session}")
-                await self.db.update_invite_task(
-                    task_id,
-                    session_alias=new_session,
-                    current_session=new_session
-                )
-                # Reload task
-                task = await self.db.get_invite_task(task_id)
-            else:
-                # Should be caught by 'not valid_sessions' check above, but for safety
-                return {"success": False, "error": "No valid sessions available to switch to."}
-
-        # Also fallback for manual available_sessions change (existing logic)
-        elif task.available_sessions and task.session_alias not in task.available_sessions:
-             # If current alias is valid (in valid_sessions) but strict available_sessions changed?
-             # Usually available_sessions IS what we validated against.
-             # So if alias is in valid_sessions, it MUST be in available_sessions (checking logic uses available_sessions).,
-             pass 
+        # Select initial sessions for different roles
+        initial_data_fetcher = data_fetcher_sessions[0] if data_fetcher_sessions else None
+        initial_inviter = inviter_sessions[0] if inviter_sessions else None
+        
+        # Update current session assignments
+        await self.db.update_invite_task(
+            task_id,
+            current_data_fetcher=initial_data_fetcher,
+            current_inviter=initial_inviter,
+            session_alias=initial_inviter or initial_data_fetcher,  # Fallback for compatibility
+            current_session=initial_inviter or initial_data_fetcher
+        )
+        
+        # Reload task with updated data
+        task = await self.db.get_invite_task(task_id)
+        task.current_data_fetcher = initial_data_fetcher
+        task.current_inviter = initial_inviter
+        
+        logger.info(f"🎯 [ROLE_ASSIGNMENT] Task {task_id} - Data fetcher: {initial_data_fetcher}, Inviter: {initial_inviter}")
 
         if task_id in self.running_tasks and not self.running_tasks[task_id].done():
             return {"success": False, "error": "Task is already running"}
@@ -116,22 +158,35 @@ class InviterWorker:
         proxy_info = await self.session_manager.get_proxy_info(task.session_alias, task.use_proxy)
         proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
         
+        # Initialize smart rotation
+        from .smart_rotation import SmartSessionRotator
+        rotator = SmartSessionRotator(self.db)
+        
+        # Log enhanced session assignment
+        rotation_status = rotator.format_rotation_status(task)
+        session_summary = rotator.format_available_sessions_summary(task)
+        logger.info(f"🎯 [ENHANCED_START] Task {task_id} starting with role-based sessions:")
+        logger.info(f"🎯 [ENHANCED_START] {rotation_status}")
+        logger.info(f"🎯 [ENHANCED_START] Available: {session_summary}")
+        
         # Start the task in background - choose method based on invite_mode
         if task.invite_mode == 'message_based':
             self.running_tasks[task_id] = asyncio.create_task(
-                self._run_message_based_invite_task(task_id)
+                self._run_message_based_invite_task_enhanced(task_id)
             )
-            logger.info(f"Запущена задача инвайтинга по сообщениям {task_id} (сессия: {task.session_alias}{proxy_str})")
+            logger.info(f"Запущена задача инвайтинга по сообщениям {task_id} с умной ротацией")
         elif task.invite_mode == 'from_file':
             self.running_tasks[task_id] = asyncio.create_task(
-                self._run_from_file_invite_task(task_id)
+                self._run_from_file_invite_task_enhanced(task_id)
             )
-            logger.info(f"Запущена задача инвайтинга из файла {task_id} (файл: {task.file_source}, сессия: {task.session_alias}{proxy_str})")
+            logger.info(f"Запущена задача инвайтинга из файла {task_id} с умной ротацией")
         else:
+            from .enhanced_invite_methods import EnhancedInviteMethods
+            enhanced_methods = EnhancedInviteMethods(self)
             self.running_tasks[task_id] = asyncio.create_task(
-                self._run_invite_task(task_id)
+                enhanced_methods.run_invite_task_enhanced(task_id)
             )
-            logger.info(f"Запущена задача инвайтинга по списку участников {task_id} (сессия: {task.session_alias}{proxy_str})")
+            logger.info(f"Запущена задача инвайтинга по списку участников {task_id} с умной ротацией")
         
         # Start heartbeat tracking (will be updated during task execution)
         self._last_heartbeat[task_id] = 0  # Force first heartbeat update

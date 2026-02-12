@@ -590,6 +590,32 @@ class Database:
             await self.conn.execute("ALTER TABLE post_monitoring_tasks ADD COLUMN validation_errors TEXT")
         except:
             pass
+        
+        # Migration: add role-based session fields to invite_tasks
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN data_fetcher_sessions TEXT")
+        except:
+            pass
+            
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN inviter_sessions TEXT")
+        except:
+            pass
+            
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN current_data_fetcher TEXT")
+        except:
+            pass
+            
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN current_inviter TEXT")
+        except:
+            pass
+            
+        try:
+            await self.conn.execute("ALTER TABLE invite_tasks ADD COLUMN session_roles TEXT")
+        except:
+            pass
 
         await self.conn.commit()
 
@@ -832,6 +858,12 @@ class Database:
                 value = ','.join(value)
             elif key == 'validated_sessions' and isinstance(value, list):
                 value = ','.join(value)
+            elif key == 'data_fetcher_sessions' and isinstance(value, list):
+                value = ','.join(value)
+            elif key == 'inviter_sessions' and isinstance(value, list):
+                value = ','.join(value)
+            elif key == 'session_roles' and isinstance(value, list):
+                value = json.dumps(value)
             elif key == 'filter_mode':
                 value = str(value)
             elif key == 'inactive_threshold_days':
@@ -892,7 +924,13 @@ class Database:
             last_heartbeat=row['last_heartbeat'] if 'last_heartbeat' in row.keys() else None,
             worker_phase=row['worker_phase'] if 'worker_phase' in row.keys() else None,
             validated_sessions=row['validated_sessions'].split(',') if 'validated_sessions' in row.keys() and row['validated_sessions'] else [],
-            validation_errors=json.loads(row['validation_errors']) if 'validation_errors' in row.keys() and row['validation_errors'] else None
+            validation_errors=json.loads(row['validation_errors']) if 'validation_errors' in row.keys() and row['validation_errors'] else None,
+            # Enhanced role-based fields
+            data_fetcher_sessions=row['data_fetcher_sessions'].split(',') if 'data_fetcher_sessions' in row.keys() and row['data_fetcher_sessions'] else [],
+            inviter_sessions=row['inviter_sessions'].split(',') if 'inviter_sessions' in row.keys() and row['inviter_sessions'] else [],
+            current_data_fetcher=row['current_data_fetcher'] if 'current_data_fetcher' in row.keys() else None,
+            current_inviter=row['current_inviter'] if 'current_inviter' in row.keys() else None,
+            session_roles=json.loads(row['session_roles']) if 'session_roles' in row.keys() and row['session_roles'] else []
         )
 
     
