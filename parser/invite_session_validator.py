@@ -240,31 +240,63 @@ class InviteSessionValidator:
         """
         Предварительно 'знакомит' сессию с пользователями из файла через get_users.
         Это добавляет их в peer cache и может улучшить доступность.
+        Использует id и/или username (тег): сначала по id, при ошибке — по username.
         
         Returns:
             Dict[str, int]: Статистика введения {'introduced': count, 'errors': count}
         """
         stats = {'introduced': 0, 'errors': 0}
         
-        # Выбираем случайных пользователей для знакомства
+        # Выбираем случайных пользователей для знакомства (с id или username)
         import random
-        users_to_introduce = random.sample(file_users, min(introduction_size, len(file_users)))
+        users_with_id_or_username = [u for u in file_users if u.get('id') or u.get('username')]
+        if not users_with_id_or_username:
+            return stats
+        users_to_introduce = random.sample(
+            users_with_id_or_username, 
+            min(introduction_size, len(users_with_id_or_username))
+        )
         
         logger.info(f"🔍 [USER_INTRODUCTION] Introducing session to {len(users_to_introduce)} file users...")
         
         for user in users_to_introduce:
             user_id = user.get('id')
-            if not user_id:
-                continue
-                
-            try:
-                # Попытка получить информацию о пользователе (добавляет в кэш)
-                await client.get_users(user_id)
-                stats['introduced'] += 1
-                await asyncio.sleep(0.1)  # Небольшая пауза между запросами
-            except Exception as e:
-                stats['errors'] += 1
-                logger.debug(f"🔍 [USER_INTRODUCTION] Failed to introduce user {user_id}: {e}")
+            username = user.get('username')
+            introduced = False
+            
+            # Попытка по id
+            if user_id:
+                try:
+                    await client.get_users(user_id)
+                    stats['introduced'] += 1
+                    introduced = True
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.debug(f"🔍 [USER_INTRODUCTION] Failed by id {user_id}: {e}")
+                    # При ошибке по id пробуем по username, если есть
+                    if username:
+                        try:
+                            target = username if username.startswith('@') else f"@{username}"
+                            await client.get_users(target)
+                            stats['introduced'] += 1
+                            introduced = True
+                            await asyncio.sleep(0.1)
+                        except Exception as e2:
+                            stats['errors'] += 1
+                            logger.debug(f"🔍 [USER_INTRODUCTION] Failed by username {target}: {e2}")
+                    else:
+                        stats['errors'] += 1
+            # Нет id — пробуем по username
+            elif username:
+                try:
+                    target = username if username.startswith('@') else f"@{username}"
+                    await client.get_users(target)
+                    stats['introduced'] += 1
+                    introduced = True
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    stats['errors'] += 1
+                    logger.debug(f"🔍 [USER_INTRODUCTION] Failed to introduce user {username}: {e}")
         
         logger.info(f"🔍 [USER_INTRODUCTION] Introduction complete: {stats['introduced']} successful, {stats['errors']} errors")
         return stats
@@ -333,23 +365,39 @@ class InviteSessionValidator:
             
             loaded_members = {}
             validation_strategy = "standard"
+            resolved_source_id = None  # ID группы для загрузки участников (после входа)
             
-            # Auto-join to SOURCE group and load members for smart sampling
-            if auto_join_source and source_group_id is not None and source_group_id != -1:
-                joined, join_err = await self.session_manager.join_chat_if_needed(
-                    client, source_group_id, source_username
-                )
-                if joined:
-                    logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source group {source_group_id}, loading members and re-checking file users access")
+            # Попытка вступить в группу-источник для умной проверки (не обязательно — валидация пройдёт в любом случае)
+            # Порядок: сначала по id, потом по username из файла (source_username)
+            if auto_join_source and (source_group_id is not None and source_group_id != -1 or source_username):
+                joined = False
+                # 1. Пробуем по id
+                if source_group_id is not None and source_group_id != -1:
+                    joined, join_err = await self.session_manager.join_chat_if_needed(
+                        client, source_group_id, None  # только по id
+                    )
+                    if joined:
+                        resolved_source_id = source_group_id
+                        logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source by id {source_group_id}")
+                # 2. Не получилось — пробуем по username из файла (Gruzchempoin, @Gruzchempoin)
+                if not joined and source_username:
+                    username_clean = source_username.strip()
+                    if not username_clean.startswith('@'):
+                        username_clean = f"@{username_clean}"
+                    try:
+                        chat = await client.join_chat(username_clean)
+                        resolved_source_id = getattr(chat, 'id', None) if chat else None
+                        joined = resolved_source_id is not None
+                        if joined:
+                            logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} joined source by username {username_clean}")
+                    except Exception as e:
+                        logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} could not join by username {username_clean}: {e}")
+                
+                if joined and resolved_source_id:
                     await asyncio.sleep(2)
-                    # Загружаем участников группы-источника в peer cache и получаем их для умной выборки
-                    loaded_members = await self._load_source_members_into_cache(client, source_group_id, alias)
+                    loaded_members = await self._load_source_members_into_cache(client, resolved_source_id, alias)
                     capabilities.loaded_source_members = len(loaded_members)
                     await asyncio.sleep(1)
-                elif join_err and "INVITE_REQUEST_SENT" in (join_err or "").upper():
-                    logger.info(f"🔍 [AUTO_JOIN_SOURCE] Session {alias}: запрос на вступление в группу-источник отправлен; после одобрения админом перезапустите валидацию")
-                elif join_err:
-                    logger.debug(f"🔍 [AUTO_JOIN_SOURCE] Session {alias} could not join source: {join_err}")
             
             # Адаптивная стратегия валидации
             final_sample = sample_users

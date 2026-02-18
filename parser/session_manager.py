@@ -849,6 +849,13 @@ class SessionManager:
             logger.error(f"Не удалось разрешить peer для целевой группы {target_group_id} (сессия: {alias}{proxy_str}). Сессия не имеет доступа к группе.")
             return {"success": False, "error": f"Cannot resolve target group {target_group_id} (username: {target_username}) - session has no access", "fatal": True}
 
+        # Знакомство перед инвайтом: get_users добавляет пользователя в peer cache (по id или username)
+        try:
+            await client.get_users(user_target)
+            await asyncio.sleep(0.05)
+        except Exception as intro_err:
+            logger.debug(f"Предзнакомство с пользователем {user_target} не удалось (продолжаем инвайт): {intro_err}")
+
         try:
             await client.add_chat_members(target_group_id, user_target)
             logger.debug(f"Успешно приглашен пользователь {user_target} в группу {target_group_id} (сессия: {alias}{proxy_str})")

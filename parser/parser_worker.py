@@ -136,6 +136,7 @@ class ParserWorker:
                 metadata = self.task_metadata.get(task_id, {
                     'source_group_id': task.source_group_id,
                     'source_group_title': task.source_group_title,
+                    'source_username': getattr(task, 'source_username', None),
                     'filter_admins': task.filter_admins,
                     'filter_inactive': task.filter_inactive,
                     'inactive_days': task.inactive_threshold_days,
@@ -184,6 +185,7 @@ class ParserWorker:
         metadata = {
             'source_group_id': task.source_group_id,
             'source_group_title': task.source_group_title,
+            'source_username': getattr(task, 'source_username', None),
             'filter_admins': task.filter_admins,
             'filter_inactive': task.filter_inactive,
             'inactive_days': task.inactive_threshold_days,
