@@ -182,7 +182,7 @@ class InviterWorker:
         # Start the task in background - choose method based on invite_mode
         if task.invite_mode == 'message_based':
             self.running_tasks[task_id] = asyncio.create_task(
-                self._run_message_based_invite_task_enhanced(task_id)
+                self._run_message_based_invite_task(task_id)
             )
             logger.info(f"Запущена задача инвайтинга по сообщениям {task_id} с умной ротацией")
         elif task.invite_mode == 'from_file':
