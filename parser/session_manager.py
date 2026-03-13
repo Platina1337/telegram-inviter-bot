@@ -227,6 +227,11 @@ class SessionManager:
         """Get all sessions from database."""
         return await self.db.get_all_sessions()
     
+    async def list_sessions(self) -> List[Dict[str, Any]]:
+        """Return sessions as list of dicts (alias, phone, etc.) for parser/worker compatibility."""
+        sessions = await self.get_all_sessions()
+        return [{'alias': s.alias, 'phone': s.phone or '', 'is_active': s.is_active} for s in sessions]
+    
     async def get_sessions_for_task(self, task: str) -> List[SessionMeta]:
         """Get sessions assigned to a specific task."""
         return await self.db.get_sessions_for_task(task)
@@ -298,9 +303,17 @@ class SessionManager:
             return session.proxy
         return None
     
-    async def get_client(self, alias: str, use_proxy: bool = True) -> Optional[Client]:
-        """Get a Pyrogram client by alias, creating or restarting if necessary."""
-        logger.debug(f"[SESSION_MANAGER] Получение клиента для сессии: {alias} (use_proxy={use_proxy})")
+    async def get_client(self, alias: str, use_proxy: bool = True, connection_timeout: Optional[int] = None) -> Optional[Client]:
+        """Get a Pyrogram client by alias, creating or restarting if necessary.
+        
+        Args:
+            alias: Session alias
+            use_proxy: Whether to use proxy
+            connection_timeout: Max seconds to wait for connection. Default 30.
+                Use 10-15 for validation to fail fast and allow rotation.
+        """
+        timeout = connection_timeout if connection_timeout is not None else 30
+        logger.debug(f"[SESSION_MANAGER] Получение клиента для сессии: {alias} (use_proxy={use_proxy}, timeout={timeout}s)")
         
         session = await self.db.get_session_by_alias(alias)
         if not session:
@@ -1109,6 +1122,8 @@ class SessionManager:
         """
         Validate sessions for a task (pre-start check).
         Checks if sessions have access to source/target chats.
+        Uses PARALLEL validation with short timeout (15s) so one bad proxy
+        does not block the bot - we fail fast and rotate.
         
         Args:
             task_type: 'invite', 'parse', 'post_parse', 'post_monitoring'
@@ -1128,35 +1143,31 @@ class SessionManager:
                  sessions_to_check = task.available_sessions.split(',')
              else:
                  return {"valid": [], "invalid": {"global": "No sessions assigned"}}
-
-        for alias in sessions_to_check:
-            if not alias: continue
-            
+        
+        sessions_to_check = [a for a in sessions_to_check if a]
+        if not sessions_to_check:
+            return {"valid": [], "invalid": {"global": "No sessions to check"}}
+        
+        use_proxy = getattr(task, 'use_proxy', True)
+        VALIDATION_CONNECTION_TIMEOUT = 15  # Fail fast - don't block bot on bad proxy
+        
+        async def _validate_one(alias: str) -> tuple:
+            """Validate single session. Returns (alias, success, error_or_none)."""
             try:
-                # Use proxy from task if available, or default
-                use_proxy = getattr(task, 'use_proxy', True)
-                client = await self.get_client(alias, use_proxy=use_proxy)
+                client = await self.get_client(alias, use_proxy=use_proxy, connection_timeout=VALIDATION_CONNECTION_TIMEOUT)
                 
                 if not client:
-                    invalid[alias] = self._last_client_error.get(
-                        alias,
-                        "Сессия не подключена (не удалось инициализировать)"
-                    )
-                    continue
+                    err = self._last_client_error.get(alias, "Сессия не подключена (не удалось инициализировать)")
+                    return (alias, False, err)
                 
-                # Check connection
+                # Rare: get_client returned client but not connected - try start with timeout
                 if not client.is_connected:
                     try:
-                        # Start with quick timeout just to check
-                        # But get_client usually starts it. 
-                        # If get_client returned valid object but not connected, try start
-                        await client.start()
+                        await asyncio.wait_for(client.start(), timeout=5)
+                    except asyncio.TimeoutError:
+                        return (alias, False, "Connection timeout (proxy/network)")
                     except Exception as e:
-                        invalid[alias] = f"Connection failed: {e}"
-                        if client.is_connected: # cleanup if partially started
-                             try: await client.stop() 
-                             except: pass
-                        continue
+                        return (alias, False, f"Connection failed: {e}")
                 
                 # Validation based on task type
                 if task_type == 'invite':
@@ -1166,24 +1177,20 @@ class SessionManager:
                          src_user = task.source_username
                          src = await ensure_peer_resolved(client, src_id, src_user)
                          if not src:
-                             invalid[alias] = f"No access to source group {src_id}"
-                             continue
+                             return (alias, False, f"No access to source group {src_id}")
                          joined, error = await self.join_chat_if_needed(client, src_id, src_user)
                          if not joined:
-                             invalid[alias] = f"Не удалось вступить в группу-источник: {error}"
-                             continue
+                             return (alias, False, f"Не удалось вступить в группу-источник: {error}")
                     
                     # Target check
                     dst_id = task.target_group_id
                     dst_user = task.target_username
                     dst = await ensure_peer_resolved(client, dst_id, dst_user)
                     if not dst:
-                        invalid[alias] = f"No access to target group {dst_id}"
-                        continue
+                        return (alias, False, f"No access to target group {dst_id}")
                     joined, error = await self.join_chat_if_needed(client, dst_id, dst_user)
                     if not joined:
-                        invalid[alias] = f"Не удалось вступить в целевую группу: {error}"
-                        continue
+                        return (alias, False, f"Не удалось вступить в целевую группу: {error}")
                     
                 elif task_type == 'parse':
                     # Source check
@@ -1191,26 +1198,20 @@ class SessionManager:
                     src_user = task.source_username
                     src = await ensure_peer_resolved(client, src_id, src_user)
                     if not src:
-                        invalid[alias] = f"No access to source group {src_id}"
-                        continue
+                        return (alias, False, f"No access to source group {src_id}")
                     joined, error = await self.join_chat_if_needed(client, src_id, src_user)
                     if not joined:
-                        invalid[alias] = f"Не удалось вступить в группу-источник: {error}"
-                        continue
+                        return (alias, False, f"Не удалось вступить в группу-источник: {error}")
                     
                     # Check member list visibility for member_list mode
                     if getattr(task, 'parse_mode', 'member_list') == 'member_list':
                         try:
-                             # Try to get 1 member to check privileges
-                             # Iterating over async generator
                              has_members = False
                              async for _ in client.get_chat_members(src_id, limit=1):
                                  has_members = True
                                  break
-                             # If we got here, we have access to members
                         except Exception as e:
-                            invalid[alias] = f"Cannot fetch members: {e}"
-                            continue
+                            return (alias, False, f"Cannot fetch members: {e}")
 
                 elif task_type in ['post_parse', 'post_monitoring']:
                     # Source check
@@ -1218,28 +1219,37 @@ class SessionManager:
                     src_user = task.source_username
                     src = await ensure_peer_resolved(client, src_id, src_user)
                     if not src:
-                        invalid[alias] = f"No access to source {src_id}"
-                        continue
+                        return (alias, False, f"No access to source {src_id}")
                     joined, error = await self.join_chat_if_needed(client, src_id, src_user)
                     if not joined:
-                        invalid[alias] = f"Не удалось вступить в источник: {error}"
-                        continue
+                        return (alias, False, f"Не удалось вступить в источник: {error}")
                     
                     # Target check
                     dst_id = task.target_id
                     dst_user = task.target_username
                     dst = await ensure_peer_resolved(client, dst_id, dst_user)
                     if not dst:
-                        invalid[alias] = f"No access to target {dst_id}"
-                        continue
+                        return (alias, False, f"No access to target {dst_id}")
                     joined, error = await self.join_chat_if_needed(client, dst_id, dst_user)
                     if not joined:
-                        invalid[alias] = f"Не удалось вступить в цель: {error}"
-                        continue
+                        return (alias, False, f"Не удалось вступить в цель: {error}")
 
-                valid.append(alias)
+                return (alias, True, None)
 
             except Exception as e:
-                invalid[alias] = str(e)
+                return (alias, False, str(e))
+        
+        # Validate all sessions in parallel (max ~15 sec total instead of N*30)
+        results = await asyncio.gather(*[_validate_one(a) for a in sessions_to_check], return_exceptions=True)
+        
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning(f"Validation raised: {r}")
+                continue
+            alias, success, err = r
+            if success:
+                valid.append(alias)
+            else:
+                invalid[alias] = err or "Unknown error"
         
         return {"valid": valid, "invalid": invalid}

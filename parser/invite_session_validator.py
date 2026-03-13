@@ -354,7 +354,7 @@ class InviteSessionValidator:
         capabilities = SessionCapabilities(last_validated=datetime.now().isoformat())
         
         try:
-            client = await self.session_manager.get_client(alias, use_proxy=use_proxy)
+            client = await self.session_manager.get_client(alias, use_proxy=use_proxy, connection_timeout=15)
             if not client or not client.is_connected:
                 capabilities.target_access_error = "Session not connected"
                 capabilities.file_users_error = "Session not connected"
@@ -570,7 +570,7 @@ class InviteSessionValidator:
             try:
                 capabilities = SessionCapabilities(last_validated=datetime.now().isoformat())
                 
-                client = await self.session_manager.get_client(alias, use_proxy=task.use_proxy)
+                client = await self.session_manager.get_client(alias, use_proxy=task.use_proxy, connection_timeout=15)
                 if not client or not client.is_connected:
                     capabilities.target_access_error = "Session not connected"
                     invalid_sessions[alias] = "Session not connected"
@@ -793,7 +793,7 @@ class InviteSessionValidator:
         capabilities = SessionCapabilities(last_validated=datetime.now().isoformat())
         
         try:
-            client = await self.session_manager.get_client(alias, use_proxy=use_proxy)
+            client = await self.session_manager.get_client(alias, use_proxy=use_proxy, connection_timeout=15)
             if not client or not client.is_connected:
                 capabilities.source_access_error = "Session not connected"
                 capabilities.target_access_error = "Session not connected"

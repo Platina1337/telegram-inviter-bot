@@ -269,14 +269,29 @@ class ParserWorker:
             proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
             logger.info(f"🌐 Задача {task_id} - прокси: {proxy_str}")
             
-            # Get client
-            client = await self.session_manager.get_client(current_session, use_proxy=task.use_proxy)
+            # Get client - ROTATE through sessions if current one fails (e.g. bad proxy)
+            client = None
+            failed_on_init = []
+            for attempt_alias in available_sessions:
+                client = await self.session_manager.get_client(attempt_alias, use_proxy=task.use_proxy)
+                if client:
+                    current_session = attempt_alias
+                    proxy_info = await self.session_manager.get_proxy_info(current_session, task.use_proxy)
+                    proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
+                    break
+                failed_on_init.append(attempt_alias)
+                logger.warning(f"Задача {task_id}: сессия {attempt_alias} недоступна (прокси/сеть), пробуем следующую...")
+            
             if not client:
-                # Detailed error message with proxy info
-                if proxy_info:
-                    error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{current_session}' через прокси {proxy_info}. Прокси недоступен, неверен или заблокирован."
-                else:
-                    error_msg = f"❌ Сессия '{current_session}' недоступна"
+                last_tried = failed_on_init[-1] if failed_on_init else (available_sessions[0] if available_sessions else "?")
+                err_detail = self.session_manager._last_client_error.get(
+                    last_tried,
+                    "Прокси недоступен или сессия не подключается"
+                )
+                error_msg = (
+                    f"❌ Не удалось подключить ни одну из {len(available_sessions)} сессий. "
+                    f"Проблемные: {failed_on_init}. Последняя ошибка: {err_detail}"
+                )
                 raise Exception(error_msg)
             
             logger.info(f"✅ Задача {task_id} - клиент получен для сессии {current_session}{proxy_str}")
@@ -672,19 +687,25 @@ class ParserWorker:
             # Use current session or first available
             current_session = task.session_alias if task.session_alias in available_sessions else available_sessions[0]
             
-            # Get proxy info
-            proxy_info = await self.session_manager.get_proxy_info(current_session, task.use_proxy)
-            proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
+            # Get client - ROTATE through sessions if proxy/connection fails
+            client = None
+            failed_on_init = []
+            for attempt_alias in available_sessions:
+                client = await self.session_manager.get_client(attempt_alias, use_proxy=task.use_proxy)
+                if client:
+                    current_session = attempt_alias
+                    break
+                failed_on_init.append(attempt_alias)
+                logger.warning(f"Задача {task_id}: сессия {attempt_alias} недоступна (прокси/сеть), пробуем следующую...")
             
-            # Get client
-            client = await self.session_manager.get_client(current_session, use_proxy=task.use_proxy)
             if not client:
-                if proxy_info:
-                    error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{current_session}' через прокси {proxy_info}. Прокси недоступен или неверен."
-                else:
-                    error_msg = f"❌ Сессия '{current_session}' недоступна"
+                last_tried = failed_on_init[-1] if failed_on_init else (available_sessions[0] if available_sessions else "?")
+                err_detail = self.session_manager._last_client_error.get(last_tried, "Прокси недоступен или сессия не подключается")
+                error_msg = f"❌ Не удалось подключить ни одну из {len(available_sessions)} сессий. Проблемные: {failed_on_init}. {err_detail}"
                 raise Exception(error_msg)
             
+            proxy_info = await self.session_manager.get_proxy_info(current_session, task.use_proxy)
+            proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
             logger.info(f"✅ Задача {task_id} - клиент получен для сессии {current_session}{proxy_str}")
             
             # Initialize counters
@@ -1041,19 +1062,25 @@ class ParserWorker:
             # Use current session or first available
             current_session = task.session_alias if task.session_alias in available_sessions else available_sessions[0]
             
-            # Get proxy info
-            proxy_info = await self.session_manager.get_proxy_info(current_session, task.use_proxy)
-            proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
+            # Get client - ROTATE through sessions if current one fails (e.g. bad proxy)
+            client = None
+            failed_on_init = []
+            for attempt_alias in available_sessions:
+                client = await self.session_manager.get_client(attempt_alias, use_proxy=task.use_proxy)
+                if client:
+                    current_session = attempt_alias
+                    break
+                failed_on_init.append(attempt_alias)
+                logger.warning(f"Задача {task_id}: сессия {attempt_alias} недоступна (прокси/сеть), пробуем следующую...")
             
-            # Get client
-            client = await self.session_manager.get_client(current_session, use_proxy=task.use_proxy)
             if not client:
-                if proxy_info:
-                    error_msg = f"❌ Ошибка прокси: Не удалось подключить сессию '{current_session}' через прокси {proxy_info}. Прокси недоступен или неверен."
-                else:
-                    error_msg = f"❌ Сессия '{current_session}' недоступна"
+                last_tried = failed_on_init[-1] if failed_on_init else (available_sessions[0] if available_sessions else "?")
+                err_detail = self.session_manager._last_client_error.get(last_tried, "Прокси недоступен или сессия не подключается")
+                error_msg = f"❌ Не удалось подключить ни одну из {len(available_sessions)} сессий. Проблемные: {failed_on_init}. {err_detail}"
                 raise Exception(error_msg)
             
+            proxy_info = await self.session_manager.get_proxy_info(current_session, task.use_proxy)
+            proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
             logger.info(f"✅ Задача {task_id} - клиент получен для сессии {current_session}{proxy_str}")
             
             # Initialize counters

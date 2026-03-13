@@ -58,16 +58,27 @@ class EnhancedInviteMethods:
             
             await self.db.update_invite_task(task_id, worker_phase='fetching_members')
             
-            # Get current data fetcher session
+            # Get data fetcher - ROTATE through sessions if proxy/connection fails
             current_data_fetcher = task.current_data_fetcher or task.data_fetcher_sessions[0]
-            data_fetcher_client = await self.session_manager.get_client(current_data_fetcher, task.use_proxy)
+            data_fetcher_client = None
+            for df_alias in task.data_fetcher_sessions:
+                data_fetcher_client = await self.session_manager.get_client(df_alias, task.use_proxy)
+                if data_fetcher_client:
+                    current_data_fetcher = df_alias
+                    break
+                logger.warning(f"🔄 [ENHANCED_TASK] Data fetcher {df_alias} недоступен (прокси/сеть), пробуем следующую...")
             
             if not data_fetcher_client:
-                logger.error(f"🔄 [ENHANCED_TASK] Cannot get data fetcher client: {current_data_fetcher}")
+                last_tried = task.data_fetcher_sessions[-1] if task.data_fetcher_sessions else "?"
+                err = self.session_manager._last_client_error.get(
+                    last_tried,
+                    "Прокси/сеть недоступны"
+                )
+                logger.error(f"🔄 [ENHANCED_TASK] Cannot get any data fetcher client: {err}")
                 await self.db.update_invite_task(
                     task_id, 
                     status='failed', 
-                    error_message=f"Data fetcher session {current_data_fetcher} unavailable"
+                    error_message=f"Ни одна сессия для загрузки участников недоступна. {err}"
                 )
                 return
             
