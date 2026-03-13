@@ -383,62 +383,67 @@ class SessionManager:
             proxy_info = await self.get_proxy_info(alias, use_proxy)
             proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
             
-            try:
-                # Apply timeout for connection - especially important for bad proxies
-                # Pyrogram can hang indefinitely if proxy is unreachable
-                connection_timeout = 30  # 30 seconds timeout
-                
+            # Retry for SQLite "database is locked" - transient when another task uses same session
+            max_retries = 3
+            connection_timeout = timeout
+            
+            for attempt in range(max_retries):
                 try:
                     await asyncio.wait_for(client.start(), timeout=connection_timeout)
                     logger.info(f"Запущена сессия: {alias}{proxy_str}")
+                    break
                 except asyncio.TimeoutError:
-                    # Connection timeout - likely bad proxy
                     error_msg = f"Таймаут подключения ({connection_timeout}с). Прокси недоступен или неверен."
                     logger.error(f"Таймаут подключения ({connection_timeout}с) для сессии {alias}{proxy_str}. Прокси недоступен или неверен.")
                     if alias in self.clients:
                         try:
                             if self.clients[alias].is_connected:
                                 await self.clients[alias].stop()
-                        except:
+                        except Exception:
                             pass
                         del self.clients[alias]
                     self._last_client_error[alias] = error_msg
                     return None
-                    
-            except OSError as e:
-                error_msg = f"Ошибка сети: {e}"
-                logger.error(f"Ошибка сети при подключении сессии {alias}{proxy_str}: {e}")
-                if alias in self.clients:
-                    del self.clients[alias]
-                self._last_client_error[alias] = error_msg
-                return None
-            except ConnectionError as e:
-                error_msg = f"Прокси отклонил подключение: {e}"
-                logger.error(f"Ошибка подключения к прокси для сессии {alias}{proxy_str}: {e}")
-                if alias in self.clients:
-                    del self.clients[alias]
-                self._last_client_error[alias] = error_msg
-                return None
-            except (AuthKeyUnregistered, AuthKeyDuplicated) as e:
-                error_msg = "Сессия отозвана или сброшена в Telegram. Нужно заново войти в аккаунт."
-                logger.error(f"Сессия {alias}: {e}")
-                if alias in self.clients:
-                    del self.clients[alias]
-                self._last_client_error[alias] = error_msg
-                return None
-            except Exception as e:
-                error_str = str(e).lower()
-                if "proxy" in error_str or "socks" in error_str or "connect" in error_str or "network" in error_str:
-                    error_msg = f"Прокси/сеть: {e}"
-                elif "auth" in error_str or "session" in error_str or "invalid" in error_str:
-                    error_msg = f"Сессия или авторизация: {e}"
-                else:
-                    error_msg = f"Ошибка запуска: {e}"
-                logger.error(f"Не удалось запустить сессию {alias}{proxy_str}: {e}")
-                if alias in self.clients:
-                    del self.clients[alias]
-                self._last_client_error[alias] = error_msg
-                return None
+                except OSError as e:
+                    error_msg = f"Ошибка сети: {e}"
+                    logger.error(f"Ошибка сети при подключении сессии {alias}{proxy_str}: {e}")
+                    if alias in self.clients:
+                        del self.clients[alias]
+                    self._last_client_error[alias] = error_msg
+                    return None
+                except ConnectionError as e:
+                    error_msg = f"Прокси отклонил подключение: {e}"
+                    logger.error(f"Ошибка подключения к прокси для сессии {alias}{proxy_str}: {e}")
+                    if alias in self.clients:
+                        del self.clients[alias]
+                    self._last_client_error[alias] = error_msg
+                    return None
+                except (AuthKeyUnregistered, AuthKeyDuplicated) as e:
+                    error_msg = "Сессия отозвана или сброшена в Telegram. Нужно заново войти в аккаунт."
+                    logger.error(f"Сессия {alias}: {e}")
+                    if alias in self.clients:
+                        del self.clients[alias]
+                    self._last_client_error[alias] = error_msg
+                    return None
+                except Exception as e:
+                    error_str = str(e).lower()
+                    # Retry for SQLite "database is locked" - another task may be using the session
+                    if ("database is locked" in error_str or "locked" in error_str) and attempt < max_retries - 1:
+                        delay = 2 + attempt
+                        logger.warning(f"database is locked для {alias}, повтор {attempt + 1}/{max_retries} через {delay} сек...")
+                        await asyncio.sleep(delay)
+                        continue
+                    if "proxy" in error_str or "socks" in error_str or "connect" in error_str or "network" in error_str:
+                        error_msg = f"Прокси/сеть: {e}"
+                    elif "auth" in error_str or "session" in error_str or "invalid" in error_str:
+                        error_msg = f"Сессия или авторизация: {e}"
+                    else:
+                        error_msg = f"Ошибка запуска: {e}"
+                    logger.error(f"Не удалось запустить сессию {alias}{proxy_str}: {e}")
+                    if alias in self.clients:
+                        del self.clients[alias]
+                    self._last_client_error[alias] = error_msg
+                    return None
         
         self._last_client_error.pop(alias, None)
         return client
@@ -607,7 +612,9 @@ class SessionManager:
             # Try to create and start client with proxy settings
             client = await self.get_client(alias, use_proxy=use_proxy)
             if not client:
-                return {"success": False, "error": "Failed to create client"}
+                # Return actual error from get_client (e.g. "database is locked", proxy errors)
+                actual_error = self._last_client_error.get(alias, "Failed to create client")
+                return {"success": False, "error": actual_error}
 
             # Test basic connectivity by getting user info and measure latency
             start_time = time.time()
