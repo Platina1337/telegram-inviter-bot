@@ -1490,6 +1490,10 @@ class InviterWorker:
             if candidate_alias in task.failed_sessions:
                 logger.debug(f"🔄 SESSION ROTATION: Task {task.id} - Skipping failed session '{candidate_alias}'")
                 continue
+
+            if self.session_manager.is_blocked(candidate_alias):
+                logger.debug(f"🔄 SESSION ROTATION: Task {task.id} - Skipping blocked session '{candidate_alias}'")
+                continue
             
             # Пропускаем сессии с высоким количеством PEER_ID ошибок для файлового режима
             if (task.invite_mode == 'from_file' and hasattr(task, '_peer_errors_count') and 

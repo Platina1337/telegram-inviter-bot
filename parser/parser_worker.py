@@ -273,6 +273,10 @@ class ParserWorker:
             client = None
             failed_on_init = []
             for attempt_alias in available_sessions:
+                if self.session_manager.is_blocked(attempt_alias):
+                    failed_on_init.append(attempt_alias)
+                    logger.warning(f"Задача {task_id}: сессия {attempt_alias} временно заблокирована после сетевых ошибок, пропускаем...")
+                    continue
                 client = await self.session_manager.get_client(attempt_alias, use_proxy=task.use_proxy)
                 if client:
                     current_session = attempt_alias
@@ -691,6 +695,10 @@ class ParserWorker:
             client = None
             failed_on_init = []
             for attempt_alias in available_sessions:
+                if self.session_manager.is_blocked(attempt_alias):
+                    failed_on_init.append(attempt_alias)
+                    logger.warning(f"Задача {task_id}: сессия {attempt_alias} временно заблокирована после сетевых ошибок, пропускаем...")
+                    continue
                 client = await self.session_manager.get_client(attempt_alias, use_proxy=task.use_proxy)
                 if client:
                     current_session = attempt_alias
@@ -1066,6 +1074,10 @@ class ParserWorker:
             client = None
             failed_on_init = []
             for attempt_alias in available_sessions:
+                if self.session_manager.is_blocked(attempt_alias):
+                    failed_on_init.append(attempt_alias)
+                    logger.warning(f"Задача {task_id}: сессия {attempt_alias} временно заблокирована после сетевых ошибок, пропускаем...")
+                    continue
                 client = await self.session_manager.get_client(attempt_alias, use_proxy=task.use_proxy)
                 if client:
                     current_session = attempt_alias

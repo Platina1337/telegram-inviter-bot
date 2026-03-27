@@ -7,6 +7,7 @@ import os
 import logging
 import asyncio
 import time
+import socket
 import httpx
 from typing import Dict, List, Optional, Any
 from pyrogram import Client
@@ -141,7 +142,27 @@ class SessionManager:
         self.session_dir = session_dir or config.SESSIONS_DIR
         self.clients: Dict[str, Client] = {}
         self._last_client_error: Dict[str, str] = {}  # alias -> last error when get_client failed
+        self._blocked_until: Dict[str, float] = {}  # alias -> unix timestamp (temporary quarantine after network/proxy errors)
         self.ensure_session_dir()
+
+    def is_blocked(self, alias: str) -> bool:
+        """Return True if session is temporarily quarantined after connection errors."""
+        blocked_until = self._blocked_until.get(alias)
+        if blocked_until is None:
+            return False
+        now_ts = time.time()
+        if blocked_until <= now_ts:
+            self._blocked_until.pop(alias, None)
+            return False
+        return True
+
+    def block_session(self, alias: str, seconds: int, reason: str) -> None:
+        """Temporarily block a session to prevent hot reconnect loops."""
+        ttl = max(30, int(seconds))
+        until_ts = time.time() + ttl
+        self._blocked_until[alias] = until_ts
+        self._last_client_error[alias] = f"{reason} (session blocked for {ttl}s)"
+        logger.warning(f"Сессия {alias} временно заблокирована на {ttl}с: {reason}")
     
     def ensure_session_dir(self):
         """Ensure session directory exists."""
@@ -275,6 +296,7 @@ class SessionManager:
                 except Exception as e:
                     logger.warning(f"Ошибка остановки клиента {alias}: {e}")
             del self.clients[alias]
+        self._blocked_until.pop(alias, None)
         
         # Delete from DB
         await self.db.delete_session(session.id)
@@ -318,6 +340,11 @@ class SessionManager:
         session = await self.db.get_session_by_alias(alias)
         if not session:
             self._last_client_error[alias] = "Сессия не найдена в базе"
+            return None
+
+        if self.is_blocked(alias):
+            remaining = int(self._blocked_until.get(alias, time.time()) - time.time())
+            self._last_client_error[alias] = f"Сессия временно заблокирована после ошибок сети/прокси (осталось ~{max(1, remaining)}с)"
             return None
             
         # Determine target proxy configuration
@@ -402,21 +429,22 @@ class SessionManager:
                         except Exception:
                             pass
                         del self.clients[alias]
-                    self._last_client_error[alias] = error_msg
+                    self.block_session(alias, 180, error_msg)
                     return None
                 except OSError as e:
                     error_msg = f"Ошибка сети: {e}"
                     logger.error(f"Ошибка сети при подключении сессии {alias}{proxy_str}: {e}")
                     if alias in self.clients:
                         del self.clients[alias]
-                    self._last_client_error[alias] = error_msg
+                    cooldown = 300 if isinstance(e, socket.timeout) else 180
+                    self.block_session(alias, cooldown, error_msg)
                     return None
                 except ConnectionError as e:
                     error_msg = f"Прокси отклонил подключение: {e}"
                     logger.error(f"Ошибка подключения к прокси для сессии {alias}{proxy_str}: {e}")
                     if alias in self.clients:
                         del self.clients[alias]
-                    self._last_client_error[alias] = error_msg
+                    self.block_session(alias, 300, error_msg)
                     return None
                 except (AuthKeyUnregistered, AuthKeyDuplicated) as e:
                     error_msg = "Сессия отозвана или сброшена в Telegram. Нужно заново войти в аккаунт."
@@ -442,10 +470,14 @@ class SessionManager:
                     logger.error(f"Не удалось запустить сессию {alias}{proxy_str}: {e}")
                     if alias in self.clients:
                         del self.clients[alias]
-                    self._last_client_error[alias] = error_msg
+                    if "proxy" in error_str or "socks" in error_str or "connect" in error_str or "network" in error_str or "timed out" in error_str:
+                        self.block_session(alias, 180, error_msg)
+                    else:
+                        self._last_client_error[alias] = error_msg
                     return None
         
         self._last_client_error.pop(alias, None)
+        self._blocked_until.pop(alias, None)
         return client
     
     async def set_session_proxy(self, alias: str, proxy_str: str) -> Dict[str, Any]:
@@ -468,6 +500,7 @@ class SessionManager:
             if client.is_connected:
                 await client.stop()
             del self.clients[alias]
+        self._blocked_until.pop(alias, None)
             
         return {"success": True, "alias": alias, "proxy": proxy_str}
 

@@ -62,6 +62,9 @@ class EnhancedInviteMethods:
             current_data_fetcher = task.current_data_fetcher or task.data_fetcher_sessions[0]
             data_fetcher_client = None
             for df_alias in task.data_fetcher_sessions:
+                if self.session_manager.is_blocked(df_alias):
+                    logger.warning(f"🔄 [ENHANCED_TASK] Data fetcher {df_alias} временно заблокирован после сетевых ошибок, пропускаем...")
+                    continue
                 data_fetcher_client = await self.session_manager.get_client(df_alias, task.use_proxy)
                 if data_fetcher_client:
                     current_data_fetcher = df_alias
