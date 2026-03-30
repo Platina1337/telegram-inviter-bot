@@ -104,7 +104,7 @@ def validate_proxy_string(proxy: str) -> Tuple[bool, str, Optional[str]]:
     # Basic format validation
     if '://' in proxy:
         # URL format
-        if not re.match(r'^(socks[45]|http|https)://[\w\.\-:@]+$', proxy, re.IGNORECASE):
+        if not re.match(r'^(socks[45][ha]?|http|https)://[\w\.\-:@]+$', proxy, re.IGNORECASE):
             return False, "", "Неверный формат прокси. Используйте: socks5://host:port или http://host:port"
     else:
         # host:port or host:port:user:pass

@@ -37,7 +37,10 @@ bot = Client(
     name="inviter_bot",
     bot_token=config.BOT_TOKEN,
     api_id=config.API_ID or 1,  # Dummy for bot
-    api_hash=config.API_HASH or "dummy"
+    api_hash=config.API_HASH or "dummy",
+    proxy=config.get_bot_proxy_dict(),
+    ipv6=False,
+    sleep_threshold=60
 )
 
 

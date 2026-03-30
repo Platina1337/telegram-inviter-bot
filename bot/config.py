@@ -35,6 +35,51 @@ class Config:
     
     API_ID: int = int(_env_api_id) if _env_api_id and _env_api_id.strip() != "0" else 2040
     API_HASH: str = _env_api_hash if _env_api_hash and _env_api_hash.strip() else "b18441a1ff607e10a989891a5462e627"
+    
+    # Bot proxy (optional)
+    BOT_PROXY: str = os.getenv("BOT_PROXY", "")
+    
+    def get_bot_proxy_dict(self) -> dict:
+        """Parse BOT_PROXY URL into a dictionary for Pyrogram Client."""
+        if not self.BOT_PROXY:
+            return None
+            
+        try:
+            from shared.validation import validate_proxy_string
+            is_valid, clean_proxy, error_msg = validate_proxy_string(self.BOT_PROXY)
+            if not is_valid:
+                return None
+                
+            # Basic parsing of scheme://user:pass@host:port
+            scheme_split = clean_proxy.split("://")
+            scheme = scheme_split[0]
+            rest = scheme_split[1]
+            
+            auth_split = rest.split("@")
+            if len(auth_split) > 1:
+                auth = auth_split[0]
+                host_port = auth_split[1]
+                user_pass = auth.split(":")
+                username = user_pass[0]
+                password = user_pass[1] if len(user_pass) > 1 else ""
+            else:
+                host_port = auth_split[0]
+                username = None
+                password = None
+                
+            hp_split = host_port.split(":")
+            hostname = hp_split[0]
+            port = int(hp_split[1]) if len(hp_split) > 1 else 1080
+            
+            return {
+                "scheme": scheme,
+                "hostname": hostname,
+                "port": port,
+                "username": username,
+                "password": password
+            }
+        except Exception:
+            return None
 
 
 config = Config()
