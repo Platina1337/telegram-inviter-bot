@@ -33,5 +33,8 @@ class Config:
     # Bot token for notifications
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 
+    # Use IPv6
+    USE_IPV6: bool = os.getenv("USE_IPV6", "False").lower() == "true"
+
 
 config = Config()

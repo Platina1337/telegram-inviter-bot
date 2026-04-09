@@ -39,6 +39,9 @@ class Config:
     # Bot proxy (optional)
     BOT_PROXY: str = os.getenv("BOT_PROXY", "")
     
+    # Use IPv6 (can help avoid blocks if ISP supports it)
+    USE_IPV6: bool = os.getenv("USE_IPV6", "False").lower() == "true"
+    
     def get_bot_proxy_dict(self) -> dict:
         """Parse BOT_PROXY URL into a dictionary for Pyrogram Client."""
         if not self.BOT_PROXY:
@@ -52,9 +55,18 @@ class Config:
                 
             # Basic parsing of scheme://user:pass@host:port
             scheme_split = clean_proxy.split("://")
-            scheme = scheme_split[0]
+            scheme = scheme_split[0].lower()
             rest = scheme_split[1]
             
+            # Normalize scheme for Pyrogram (it likes socks5, socks4, http)
+            if scheme.startswith("socks5"):
+                scheme = "socks5"
+            elif scheme.startswith("socks4"):
+                scheme = "socks4"
+            elif scheme not in ["http", "https"]:
+                # Default to socks5 if unknown scheme
+                scheme = "socks5"
+                
             auth_split = rest.split("@")
             if len(auth_split) > 1:
                 auth = auth_split[0]
@@ -78,7 +90,10 @@ class Config:
                 "username": username,
                 "password": password
             }
-        except Exception:
+        except Exception as e:
+            # Import logger here to avoid circular imports
+            import logging
+            logging.getLogger(__name__).warning(f"Error parsing BOT_PROXY: {e}")
             return None
 
 

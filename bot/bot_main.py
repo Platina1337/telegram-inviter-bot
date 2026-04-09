@@ -39,8 +39,9 @@ bot = Client(
     api_id=config.API_ID or 1,  # Dummy for bot
     api_hash=config.API_HASH or "dummy",
     proxy=config.get_bot_proxy_dict(),
-    ipv6=False,
-    sleep_threshold=60
+    ipv6=config.USE_IPV6,
+    sleep_threshold=60,
+    workdir="sessions"
 )
 
 

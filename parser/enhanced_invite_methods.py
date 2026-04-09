@@ -5,7 +5,7 @@ Enhanced invite methods with smart role-based session rotation.
 import logging
 import asyncio
 import random
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import re
 
 logger = logging.getLogger(__name__)
@@ -61,41 +61,77 @@ class EnhancedInviteMethods:
             # Get data fetcher - ROTATE through sessions if proxy/connection fails
             current_data_fetcher = task.current_data_fetcher or task.data_fetcher_sessions[0]
             data_fetcher_client = None
+            _failed_proxy_addr: Optional[str] = None  # запоминаем проблемный прокси для уведомления
+
             for df_alias in task.data_fetcher_sessions:
                 if self.session_manager.is_blocked(df_alias):
+                    # Сессия уже заблокирована — извлекаем адрес прокси из ошибки
+                    err_text = self.session_manager._last_client_error.get(df_alias, "")
+                    if not _failed_proxy_addr:
+                        _failed_proxy_addr = self._extract_proxy_addr(err_text)
                     logger.warning(f"🔄 [ENHANCED_TASK] Data fetcher {df_alias} временно заблокирован после сетевых ошибок, пропускаем...")
                     continue
                 data_fetcher_client = await self.session_manager.get_client(df_alias, task.use_proxy)
                 if data_fetcher_client:
                     current_data_fetcher = df_alias
                     break
+                # get_client вернул None — фиксируем прокси ошибку
+                err_text = self.session_manager._last_client_error.get(df_alias, "")
+                if not _failed_proxy_addr:
+                    _failed_proxy_addr = self._extract_proxy_addr(err_text)
                 logger.warning(f"🔄 [ENHANCED_TASK] Data fetcher {df_alias} недоступен (прокси/сеть), пробуем следующую...")
-            
+
             if not data_fetcher_client:
                 last_tried = task.data_fetcher_sessions[-1] if task.data_fetcher_sessions else "?"
                 err = self.session_manager._last_client_error.get(
                     last_tried,
                     "Прокси/сеть недоступны"
                 )
+                proxy_notice = f" (Proxy: `{_failed_proxy_addr}`)" if _failed_proxy_addr else ""
+                error_message = f"Ни одна сессия для загрузки участников недоступна{proxy_notice}. {err}"
                 logger.error(f"🔄 [ENHANCED_TASK] Cannot get any data fetcher client: {err}")
-                await self.db.update_invite_task(
-                    task_id, 
-                    status='failed', 
-                    error_message=f"Ни одна сессия для загрузки участников недоступна. {err}"
+                await self.db.update_invite_task(task_id, status='failed', error_message=error_message)
+                notify_text = (
+                    f"❌ *Задача {task_id} остановлена*\n\n"
+                    f"Ни одна сессия не может подключиться{proxy_notice}.\n"
+                    f"Проверьте срок действия прокси и повторите запуск.\n"
+                    f"Ошибка: `{err}`"
                 )
+                await self.worker._notify_user(task.user_id, notify_text)
                 return
-            
+
             # Get members using data fetcher session
             logger.info(f"📊 [ENHANCED_TASK] Task {task_id}: Getting members with session {current_data_fetcher}")
             members = await self.session_manager.get_group_members(
-                current_data_fetcher, 
+                current_data_fetcher,
                 task.source_group_id,
                 limit=None,
                 offset=task.current_offset
             )
-            
-            if not members:
-                logger.info(f"📊 [ENHANCED_TASK] Task {task_id}: No more members to process")
+
+            # ── Различаем None (ошибка доступа) и [] (список реально пуст) ──────
+            if members is None:
+                # Прокси упал уже ПОСЛЕ успешного получения клиента, или группа недоступна
+                err_text = self.session_manager._last_client_error.get(current_data_fetcher, "")
+                proxy_addr = self._extract_proxy_addr(err_text) or _failed_proxy_addr
+                proxy_notice = f" (Proxy: `{proxy_addr}`)" if proxy_addr else ""
+                error_message = (
+                    f"Не удалось получить участников через сессию {current_data_fetcher}{proxy_notice}. "
+                    f"Прокси недоступен или группа-источник закрыта."
+                )
+                logger.error(f"📊 [ENHANCED_TASK] Task {task_id}: {error_message}")
+                await self.db.update_invite_task(task_id, status='failed', error_message=error_message)
+                notify_text = (
+                    f"❌ *Задача {task_id} остановлена*\n\n"
+                    f"Не удалось загрузить список участников{proxy_notice}.\n"
+                    f"Проверьте срок действия прокси и повторите запуск.\n"
+                    f"Ошибка: `{err_text or 'нет доступа к группе'}`"
+                )
+                await self.worker._notify_user(task.user_id, notify_text)
+                return
+
+            if not members:  # [] — список пуст, задача завершена
+                logger.info(f"📊 [ENHANCED_TASK] Task {task_id}: Участники закончились")
                 await self.db.update_invite_task(task_id, status='completed')
                 await self.worker._notify_user(task.user_id, f"✅ **Задача завершена**: Приглашено {task.invited_count} пользователей")
                 return
@@ -346,3 +382,13 @@ class EnhancedInviteMethods:
         except Exception:
             # If we can't check, assume not in target (better to try invite than skip)
             return False
+
+    def _extract_proxy_addr(self, error_text: str) -> Optional[str]:
+        """
+        Извлекает читаемый адрес прокси (IP:port) из текста ошибки.
+        Возвращает строку вида '1.2.3.4:1234' или None.
+        """
+        m = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{2,5})', error_text or '')
+        if m:
+            return f"{m.group(1)}:{m.group(2)}"
+        return None

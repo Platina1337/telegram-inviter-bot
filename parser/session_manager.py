@@ -9,6 +9,7 @@ import asyncio
 import time
 import socket
 import httpx
+import struct
 from typing import Dict, List, Optional, Any
 from pyrogram import Client
 from pyrogram.errors import (
@@ -68,6 +69,15 @@ def parse_proxy_string(proxy_str: str) -> Optional[Dict[str, Any]]:
         else:
             hostname = host_port
             port = 80 if scheme == "http" else 1080
+            
+        # Normalize scheme
+        scheme = scheme.lower()
+        if scheme.startswith("socks5"):
+            scheme = "socks5"
+        elif scheme.startswith("socks4"):
+            scheme = "socks4"
+        elif scheme not in ["http", "https"]:
+            scheme = "socks5"
             
         return {
             "scheme": scheme,
@@ -398,7 +408,8 @@ class SessionManager:
                     api_hash=api_hash,
                     workdir=session_dir_abs,
                     phone_number=session.phone if session.phone else None,
-                    proxy=target_proxy
+                    proxy=target_proxy,
+                    ipv6=config.USE_IPV6
                 )
                 self.clients[alias] = client
                 proxy_info = await self.get_proxy_info(alias, use_proxy)
@@ -409,7 +420,30 @@ class SessionManager:
         if client and not client.is_connected:
             proxy_info = await self.get_proxy_info(alias, use_proxy)
             proxy_str = f" через прокси {proxy_info}" if proxy_info else " без прокси"
-            
+
+            # ── Быстрая TCP-проверка прокси ────────────────────────────────────
+            # Pyrogram внутри себя делает бесконечные реконнекты каждую секунду,
+            # из-за чего весь timeout (30 с) расходуется на ~30 мёртвых попыток.
+            # Мы проверяем TCP-доступность прокси за 3 секунды ДО client.start(),
+            # и если порт закрыт — сразу блокируем сессию, не запуская Pyrogram.
+            if target_proxy:
+                proxy_ok = await self._tcp_probe_proxy(target_proxy, probe_timeout=3.0)
+                if not proxy_ok:
+                    proxy_addr = f"{target_proxy.get('hostname')}:{target_proxy.get('port')}"
+                    error_msg = (
+                        f"Прокси {proxy_addr} недоступен (TCP соединение отклонено/таймаут). "
+                        f"Прокси просрочен или неверный адрес."
+                    )
+                    logger.error(
+                        f"Сессия {alias}: прокси {proxy_addr} не отвечает на TCP-подключение. "
+                        f"Сессия пропускается."
+                    )
+                    if alias in self.clients:
+                        del self.clients[alias]
+                    self.block_session(alias, 180, error_msg)
+                    return None
+            # ───────────────────────────────────────────────────────────────────
+
             # Retry for SQLite "database is locked" - transient when another task uses same session
             max_retries = 3
             connection_timeout = timeout
@@ -479,6 +513,65 @@ class SessionManager:
         self._last_client_error.pop(alias, None)
         self._blocked_until.pop(alias, None)
         return client
+
+    async def _tcp_probe_proxy(self, proxy_dict: Dict[str, Any], probe_timeout: float = 3.0) -> bool:
+        """
+        Быстрая TCP-проверка доступности прокси-сервера.
+        Возвращает True если порт открыт, False если недоступен.
+        Для SOCKS5 дополнительно пытается выполнить SOCKS5 handshake.
+        Не делает никаких Telegram-запросов.
+        """
+        hostname = proxy_dict.get('hostname')
+        port = proxy_dict.get('port')
+        scheme = (proxy_dict.get('scheme') or 'socks5').lower()
+
+        if not hostname or not port:
+            return False
+
+        try:
+            # 1. TCP connect
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(hostname, port),
+                timeout=probe_timeout
+            )
+
+            # 2. SOCKS5 greeting (необязательный — просто убеждаемся что сервер отвечает)
+            if scheme == 'socks5':
+                try:
+                    # Минимальный SOCKS5-handshake: VER=5, NMETHODS=1, METHOD=NO_AUTH(0)
+                    writer.write(b'\x05\x01\x00')
+                    await writer.drain()
+                    # Ожидаем 2 байта ответа: VER=5, METHOD
+                    data = await asyncio.wait_for(reader.read(2), timeout=2.0)
+                    # data[0] == 5 означает корректный SOCKS5-ответ
+                    if len(data) < 2 or data[0] != 5:
+                        writer.close()
+                        try:
+                            await writer.wait_closed()
+                        except Exception:
+                            pass
+                        return False
+                except Exception:
+                    # Рукопожатие не прошло — порт открыт, но не SOCKS5
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+                    return False
+
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True
+
+        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+            return False
+        except Exception as e:
+            logger.debug(f"TCP probe неожиданная ошибка для {hostname}:{port}: {e}")
+            return False
     
     async def set_session_proxy(self, alias: str, proxy_str: str) -> Dict[str, Any]:
         """Set proxy for a session."""
@@ -815,10 +908,16 @@ class SessionManager:
             return {"success": True, "has_access": False, "error": str(e)}
     
     async def get_group_members(self, alias: str, group_id: int, limit: int = 200, offset: int = 0, username: str = None, use_proxy: bool = True) -> List[Dict]:
-        """Get members from a group with offset support."""
+        """Get members from a group with offset support.
+        Returns:
+            None  — ошибка доступа (нет клиента, прокси, недоступна группа)
+            []    — список пуст (реально нет участников на этом offset)
+            [...]  — список участников
+        """
         client = await self.get_client(alias, use_proxy=use_proxy)
         if not client:
-            return []
+            # None = ошибка (прокси/сессия), а не пустой список
+            return None
 
         # Убеждаемся, что peer разрешён перед получением участников
         chat = await ensure_peer_resolved(client, group_id, username)
